@@ -186,7 +186,7 @@ Daily use: `claude-sandbox.ps1 --dangerously-skip-permissions` / `codex-sandbox.
 ### Native-route caveats
 
 - **Bind-mount performance.** Mounting Windows directories (`C:\...`) into Linux containers goes through a filesystem translation layer and is noticeably slower than Linux-native mounts — the same tax as `/mnt/c` in WSL, because under the hood it *is* the same mechanism. Heavy npm/cargo workloads feel it. This is the main reason Route A is recommended.
-- **File ownership.** Docker Desktop papers over Linux UID/GID for Windows-mounted paths, so the README's UID-matching notes don't apply; files created by the agent appear owned by you on the Windows side. Line endings in agent-created files will be LF, which modern Windows tools handle fine.
+- **File ownership.** Docker Desktop papers over Linux UID/GID for Windows-mounted paths, so the README's UID-matching notes don't apply in this route — you can omit the `--build-arg UID/GID` flags and per-user image tags when building (the defaults are fine), and files created by the agent appear owned by you on the Windows side. (In Route A, follow the README's build commands as written — WSL2 is real Linux and the UID matching matters there.) Line endings in agent-created files will be LF, which modern Windows tools handle fine.
 - **No tmux.** For detached long-running sessions, use Windows Terminal tabs left open, or run the session under WSL after all. There's no clean native detach/reattach equivalent.
 - **`--cap-drop`/`no-new-privileges`** work as on Linux — they apply to the Linux container, which lives in Docker Desktop's VM regardless of host OS.
 

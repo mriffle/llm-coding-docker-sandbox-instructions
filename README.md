@@ -71,7 +71,9 @@ Claude Code has a built-in auto-updater. The image's npm install is only a first
 # Anything else a project needs gets installed into that project's own
 # directory (./.jdk, ./.bin, etc.) — resist adding it here.
 #
-# Rebuild (rare):  docker build -t claude-sandbox ./claude-sandbox
+# Rebuild (rare):
+#   docker build --build-arg UID=$(id -u) --build-arg GID=$(id -g) \
+#     -t claude-sandbox-$USER ./claude-sandbox
 #
 # Claude Code version is NOT managed here: the npm install is only a
 # first-run bootstrap; the auto-updater keeps the real binary current
@@ -91,8 +93,13 @@ ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo
 RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --no-modify-path --profile minimal \
     && chmod -R a+rX ${RUSTUP_HOME} ${CARGO_HOME}
 
-# Non-root user (required: claude rejects --dangerously-skip-permissions as root)
-RUN useradd -m -s /bin/bash agent
+# Non-root user (required: claude rejects --dangerously-skip-permissions as
+# root). UID/GID must match the host user so the bind-mounted /workspace is
+# writable — pass them at build time; the image is therefore built per user.
+ARG UID=1001
+ARG GID=1001
+RUN (getent group ${GID} >/dev/null || groupadd -g ${GID} agent) \
+    && useradd -m -s /bin/bash -u ${UID} -g ${GID} agent
 USER agent
 WORKDIR /workspace
 
@@ -134,7 +141,7 @@ exec docker run -it --rm \
   -v "$LOCAL_VOL:/home/agent/.local" \
   --cap-drop=ALL \
   --security-opt=no-new-privileges \
-  claude-sandbox claude "$@"
+  claude-sandbox-$USER claude "$@"
 ```
 
 Notes:
@@ -146,8 +153,10 @@ Notes:
 ### Setup (per user)
 
 ```bash
-# 1. Build the image (shared across users; contains no secrets)
-docker build -t claude-sandbox ./claude-sandbox
+# 1. Build the image — per user, so the container UID matches yours and the
+#    bind-mounted project is writable
+docker build --build-arg UID=$(id -u) --build-arg GID=$(id -g) \
+  -t claude-sandbox-$USER ./claude-sandbox
 
 # 2. Install the launcher
 # (copies the script into your PATH directory and marks it executable;
@@ -230,7 +239,11 @@ ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo
 RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --no-modify-path --profile minimal \
     && chmod -R a+rX ${RUSTUP_HOME} ${CARGO_HOME}
 
-RUN useradd -m -s /bin/bash agent
+# UID/GID must match the host user (see Claude Dockerfile note)
+ARG UID=1001
+ARG GID=1001
+RUN (getent group ${GID} >/dev/null || groupadd -g ${GID} agent) \
+    && useradd -m -s /bin/bash -u ${UID} -g ${GID} agent
 USER agent
 WORKDIR /workspace
 
@@ -270,9 +283,11 @@ docker volume create "$CONFIG_VOL" >/dev/null
 LATEST=$(curl -fsSL https://registry.npmjs.org/@openai/codex/latest 2>/dev/null | jq -r .version)
 if [ -n "$LATEST" ] && [ "$LATEST" != "null" ]; then
   docker build -q --build-arg CODEX_VERSION="$LATEST" \
-    -t codex-sandbox ./codex-sandbox >/dev/null 2>&1 \
+    --build-arg UID=$(id -u) --build-arg GID=$(id -g) \
+    -t codex-sandbox-$USER ./codex-sandbox >/dev/null 2>&1 \
     || docker build -q --build-arg CODEX_VERSION="$LATEST" \
-       -t codex-sandbox ~/codex-sandbox >/dev/null
+       --build-arg UID=$(id -u) --build-arg GID=$(id -g) \
+       -t codex-sandbox-$USER ~/codex-sandbox >/dev/null
 fi
 
 exec docker run -it --rm \
@@ -281,7 +296,7 @@ exec docker run -it --rm \
   -v "$CONFIG_VOL:/home/agent/.codex" \
   --cap-drop=ALL \
   --security-opt=no-new-privileges \
-  codex-sandbox codex "$@"
+  codex-sandbox-$USER codex "$@"
 ```
 
 > Adjust the Dockerfile path in the build commands to wherever you keep this
@@ -292,8 +307,10 @@ exec docker run -it --rm \
 ### Setup (per user)
 
 ```bash
-# 1. Initial build (deliberate, so the first login doesn't hide a slow build)
-docker build -t codex-sandbox ./codex-sandbox
+# 1. Initial build — per user, matching your UID (deliberate first build,
+#    so the first login doesn't hide a slow image compile)
+docker build --build-arg UID=$(id -u) --build-arg GID=$(id -g) \
+  -t codex-sandbox-$USER ./codex-sandbox
 
 # 2. Install the launcher
 install -D -m 755 bin/codex-sandbox ~/.local/bin/codex-sandbox
@@ -339,6 +356,13 @@ The images deliberately omit occasional-use toolchains (Java, Go, etc.). Project
 
 - **Concurrent sessions (one user):** fully supported. Containers are independent; the shared volumes tolerate concurrency (this is the same as running the agent in several terminal tabs). The only real hazard is two sessions editing the *same checkout* — use `git worktree` for parallel work on one repo.
 - **Multiple users (shared rootful Docker):** the `$USER`-namespaced volumes prevent *accidental* cross-user interference. They do **not** prevent deliberate access: anyone in the `docker` group can mount anyone's volume, because docker-group membership on a rootful daemon is root-equivalent. Treat this configuration as *collision-proof, not confidential*. If users on the box aren't mutually trusted with each other's agent credentials, use [rootless Docker](https://docs.docker.com/engine/security/rootless/) per user instead — every user gets an isolated daemon and truly private volumes, and everything in this repo works identically (drop the `$USER` suffixes if you like).
+- **Why images are per-user too:** the container's `agent` user must have *your* UID, or the bind-mounted `/workspace` (owned by you on the host) isn't writable from inside — the agent will report something like "couldn't save, /workspace is owned by UID 1003 but this session runs as UID 1001." That's why every build command passes `--build-arg UID=$(id -u) --build-arg GID=$(id -g)` and tags the image `*-$USER`. Docker layer caching keeps this cheap: users with identical Dockerfiles share all layers up to the `useradd`.
+- **Troubleshooting UID mismatches on existing volumes:** if you built an image before setting the UID args (or your UID changed), your volumes may contain files owned by the old UID and the agent can't write its own config. Fix in place without losing auth by chowning via a throwaway root container:
+  ```bash
+  docker run --rm -v "claude-config-$USER:/v" alpine chown -R "$(id -u):$(id -g)" /v
+  docker run --rm -v "claude-local-$USER:/v"  alpine chown -R "$(id -u):$(id -g)" /v
+  docker run --rm -v "codex-config-$USER:/v"  alpine chown -R "$(id -u):$(id -g)" /v
+  ```
 
 ## Security notes
 
