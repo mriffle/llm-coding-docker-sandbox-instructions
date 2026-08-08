@@ -21,6 +21,8 @@ bin/codex-sandbox              # Codex launcher
 codex-sandbox/config.toml      # Codex autonomy config (seeded into its volume)
 ```
 
+These instructions target Linux hosts. **Windows users:** see [WINDOWS.md](WINDOWS.md) — via WSL2 the main instructions apply nearly verbatim, and a native PowerShell route is documented as a fallback.
+
 ## Before you start: a bin directory on your PATH
 
 The setups below install small launcher scripts (`claude-sandbox`, `codex-sandbox`) that you'll run by name from any project directory. For that to work, the scripts must live in a directory that's on your **PATH** — the list of directories your shell searches when you type a command. If they're not, you'll get `command not found` even though the file exists.
