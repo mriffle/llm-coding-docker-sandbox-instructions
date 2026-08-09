@@ -275,12 +275,13 @@ sandbox_mode = "danger-full-access"
 # codex-sandbox — run Codex CLI sandboxed in the current directory.
 # Codex has no self-updater: check the npm registry for a newer version
 # and rebuild the image if one exists (cached no-op otherwise).
-# Uses curl+jq so no host-side Node/npm is required.
+# Uses jq if present, with a grep fallback so no host dependency is required.
 
 CONFIG_VOL="codex-config-$USER"
 docker volume create "$CONFIG_VOL" >/dev/null
 
-LATEST=$(curl -fsSL https://registry.npmjs.org/@openai/codex/latest 2>/dev/null | jq -r .version)
+LATEST=$(curl -fsSL https://registry.npmjs.org/@openai/codex/latest 2>/dev/null \
+  | { jq -r .version 2>/dev/null || grep -o '"version":"[^"]*"' | head -1 | cut -d'"' -f4; })
 if [ -n "$LATEST" ] && [ "$LATEST" != "null" ]; then
   docker build -q --build-arg CODEX_VERSION="$LATEST" \
     --build-arg UID=$(id -u) --build-arg GID=$(id -g) \
@@ -288,6 +289,8 @@ if [ -n "$LATEST" ] && [ "$LATEST" != "null" ]; then
     || docker build -q --build-arg CODEX_VERSION="$LATEST" \
        --build-arg UID=$(id -u) --build-arg GID=$(id -g) \
        -t codex-sandbox-$USER ~/codex-sandbox >/dev/null
+else
+  echo "codex-sandbox: WARNING: npm version check failed; running existing image without update check" >&2
 fi
 
 exec docker run -it --rm \
@@ -320,9 +323,12 @@ cd ~/some-project
 codex-sandbox login --device-auth
 
 # 4. Seed the autonomy config into the volume
+#    (the chown matters: this helper runs as root, and without it the file —
+#    or on a fresh volume, the whole directory — ends up root-owned and Codex
+#    can't write its state DB)
 docker run --rm -v "codex-config-$USER:/cfg" \
   -v "$PWD/codex-sandbox/config.toml:/src/config.toml:ro" \
-  node:24-slim cp /src/config.toml /cfg/config.toml
+  node:24-slim sh -c "cp /src/config.toml /cfg/ && chown -R $(id -u):$(id -g) /cfg"
 ```
 
 ### Daily use
@@ -357,12 +363,13 @@ The images deliberately omit occasional-use toolchains (Java, Go, etc.). Project
 - **Concurrent sessions (one user):** fully supported. Containers are independent; the shared volumes tolerate concurrency (this is the same as running the agent in several terminal tabs). The only real hazard is two sessions editing the *same checkout* — use `git worktree` for parallel work on one repo.
 - **Multiple users (shared rootful Docker):** the `$USER`-namespaced volumes prevent *accidental* cross-user interference. They do **not** prevent deliberate access: anyone in the `docker` group can mount anyone's volume, because docker-group membership on a rootful daemon is root-equivalent. Treat this configuration as *collision-proof, not confidential*. If users on the box aren't mutually trusted with each other's agent credentials, use [rootless Docker](https://docs.docker.com/engine/security/rootless/) per user instead — every user gets an isolated daemon and truly private volumes, and everything in this repo works identically (drop the `$USER` suffixes if you like).
 - **Why images are per-user too:** the container's `agent` user must have *your* UID, or the bind-mounted `/workspace` (owned by you on the host) isn't writable from inside — the agent will report something like "couldn't save, /workspace is owned by UID 1003 but this session runs as UID 1001." That's why every build command passes `--build-arg UID=$(id -u) --build-arg GID=$(id -g)` and tags the image `*-$USER`. Docker layer caching keeps this cheap: users with identical Dockerfiles share all layers up to the `useradd`.
-- **Troubleshooting UID mismatches on existing volumes:** if you built an image before setting the UID args (or your UID changed), your volumes may contain files owned by the old UID and the agent can't write its own config. Fix in place without losing auth by chowning via a throwaway root container:
+- **Troubleshooting UID mismatches on existing volumes:** if you built an image before setting the UID args (or your UID changed), your volumes may contain files owned by the old UID and the agent can't write its own config. Symptoms include the `/workspace is owned by UID X but this session runs as UID Y` message, and for Codex specifically a startup failure like `unable to open database file` for `~/.codex/state_5.sqlite` plus `could not create PATH aliases: Permission denied` — that means the *image's* agent UID and the *volume's* file ownership disagree. Verify with `docker run --rm codex-sandbox-$USER id -u` (should print your `id -u`). Fix by rebuilding the image with the UID build-args, then chowning the volumes in place without losing auth:
   ```bash
   docker run --rm -v "claude-config-$USER:/v" alpine chown -R "$(id -u):$(id -g)" /v
   docker run --rm -v "claude-local-$USER:/v"  alpine chown -R "$(id -u):$(id -g)" /v
   docker run --rm -v "codex-config-$USER:/v"  alpine chown -R "$(id -u):$(id -g)" /v
   ```
+  If Codex still reports a damaged database after the ownership fix, delete its state DB (auth is in `auth.json`, unaffected): `docker run --rm -v "codex-config-$USER:/v" alpine sh -c 'rm -f /v/state_5.sqlite*'`
 
 ## Security notes
 

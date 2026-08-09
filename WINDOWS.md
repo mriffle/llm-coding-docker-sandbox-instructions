@@ -178,7 +178,10 @@ claude-sandbox.ps1 --dangerously-skip-permissions   # accept the dialog
 codex-sandbox.ps1 login --device-auth
 docker run --rm -v "codex-config-$env:USERNAME:/cfg" `
   -v "${PWD}\codex-sandbox\config.toml:/src/config.toml:ro" `
-  node:24-slim cp /src/config.toml /cfg/config.toml   # run from the repo clone
+  node:24-slim sh -c "cp /src/config.toml /cfg/ && chown -R 1001:1001 /cfg"   # run from the repo clone
+# (the chown prevents root-owned volume contents, which break Codex's state DB;
+#  1001 is the image's default agent UID — named volumes have real Linux
+#  ownership even on Docker Desktop, unlike Windows bind mounts)
 ```
 
 Daily use: `claude-sandbox.ps1 --dangerously-skip-permissions` / `codex-sandbox.ps1` from a project directory.
