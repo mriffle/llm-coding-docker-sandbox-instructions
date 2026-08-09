@@ -11,15 +11,19 @@ Design principles:
 - **Minimal images.** The image is a sandbox skeleton plus everyday toolchains (C, Python, Rust). Anything else a project needs gets installed into that project's own directory (`./.jdk`, `./.bin`, `./.venv`) — resist adding it to the image.
 - **Per-user everything.** Volume and container names are namespaced by `$USER` so multiple users on a shared rootful Docker daemon don't collide.
 
-## Repository layout
+## What you'll create
+
+These are standalone instructions — nothing needs to be cloned or downloaded from this repository; read along and create the files on your system. By the end you'll have:
 
 ```
-claude-sandbox/Dockerfile      # Claude Code image
-codex-sandbox/Dockerfile       # Codex CLI image
-bin/claude-sandbox             # Claude launcher
-bin/codex-sandbox              # Codex launcher
-codex-sandbox/config.toml      # Codex autonomy config (seeded into its volume)
+~/claude-sandbox/Dockerfile        # Claude Code image definition
+~/codex-sandbox/Dockerfile         # Codex CLI image definition
+~/codex-sandbox/config.toml        # Codex autonomy config (seeded into its volume)
+~/.local/bin/claude-sandbox        # Claude launcher script
+~/.local/bin/codex-sandbox         # Codex launcher script
 ```
+
+plus two Docker images and three named volumes that the launchers create and maintain.
 
 These instructions target Linux hosts. **Windows users:** see [WINDOWS.md](WINDOWS.md) — via WSL2 the main instructions apply nearly verbatim, and a native PowerShell route is documented as a fallback.
 
@@ -63,7 +67,7 @@ Claude Code has a built-in auto-updater. The image's npm install is only a first
 
 ### Image
 
-`claude-sandbox/Dockerfile`:
+Create the directory and Dockerfile — `mkdir -p ~/claude-sandbox`, then save this as `~/claude-sandbox/Dockerfile`:
 
 ```dockerfile
 # Sandbox image for running Claude Code with --dangerously-skip-permissions.
@@ -73,7 +77,7 @@ Claude Code has a built-in auto-updater. The image's npm install is only a first
 #
 # Rebuild (rare):
 #   docker build --build-arg UID=$(id -u) --build-arg GID=$(id -g) \
-#     -t claude-sandbox-$USER ./claude-sandbox
+#     -t claude-sandbox-$USER ~/claude-sandbox
 #
 # Claude Code version is NOT managed here: the npm install is only a
 # first-run bootstrap; the auto-updater keeps the real binary current
@@ -121,7 +125,7 @@ ENV CLAUDE_CONFIG_DIR=/home/agent/.claude
 
 ### Launcher
 
-`bin/claude-sandbox` (place on your `PATH`, `chmod +x`):
+Save this as `~/.local/bin/claude-sandbox` (see "Before you start" for the PATH setup), then make it executable with `chmod 755 ~/.local/bin/claude-sandbox`:
 
 ```bash
 #!/bin/bash
@@ -156,12 +160,10 @@ Notes:
 # 1. Build the image — per user, so the container UID matches yours and the
 #    bind-mounted project is writable
 docker build --build-arg UID=$(id -u) --build-arg GID=$(id -g) \
-  -t claude-sandbox-$USER ./claude-sandbox
+  -t claude-sandbox-$USER ~/claude-sandbox
 
-# 2. Install the launcher
-# (copies the script into your PATH directory and marks it executable;
-#  -D creates ~/.local/bin if it doesn't exist yet — see "Before you start")
-install -D -m 755 bin/claude-sandbox ~/.local/bin/claude-sandbox
+# 2. Verify the launcher is in place and executable (created above)
+which claude-sandbox   # should print ~/.local/bin/claude-sandbox
 
 # 3. First run: authenticate
 cd ~/some-project
@@ -183,14 +185,15 @@ cd ~/some-project
 claude-sandbox --dangerously-skip-permissions
 ```
 
-Detached in tmux:
+In tmux (recommended for long-running sessions — survives SSH disconnects):
 
 ```bash
-tmux new-session -d -s "claude-$(basename "$PWD")" -c "$PWD" \
-  'claude-sandbox --dangerously-skip-permissions; read'
+tmux new-session -s "claude-$(basename "$PWD")" -c "$PWD" \
+  'claude-sandbox --dangerously-skip-permissions; ec=$?; \
+   if [ $ec -ne 0 ]; then echo "exited with status $ec — press Enter to close"; read; fi'
 ```
 
-Attach with `tmux attach -t <name>`, detach with `Ctrl-b d`. Sessions survive SSH disconnects; attach from a phone SSH client to steer remotely.
+This drops you straight into the running session inside tmux. Detach (leave it running in the background) with `Ctrl-b d`; reattach later — including from a phone SSH client — with `tmux attach -t claude-<project>` (`tmux ls` lists sessions). When you quit the agent normally (`/exit` or `Ctrl-d`), the tmux session ends with it; the pane only lingers (waiting for Enter) if the agent exited with an error, so crash output isn't lost. To start a session in the background *without* attaching (e.g., from a script), add `-d` after `new-session` and attach whenever you like.
 
 **Remote Control:** Claude Code's Remote Control (steer sessions from the Claude app / claude.ai) currently cannot be combined with `--dangerously-skip-permissions` — the flags are mutually exclusive and the mobile UI re-prompts for approvals regardless (see [anthropics/claude-code#31908](https://github.com/anthropics/claude-code/issues/31908)). Pick per session: autonomous (flag, monitor via tmux) or remote-steerable (type `/remote-control` in a session, approve from the app).
 
@@ -217,7 +220,7 @@ Same architecture, three differences:
 
 ### Image
 
-`codex-sandbox/Dockerfile`:
+Create the directory and Dockerfile — `mkdir -p ~/codex-sandbox`, then save this as `~/codex-sandbox/Dockerfile`:
 
 ```dockerfile
 # Codex CLI sandbox. Same philosophy as claude-sandbox.
@@ -259,7 +262,7 @@ ENV PATH=/home/agent/.npm-global/bin:/home/agent/.cargo/bin:/usr/local/cargo/bin
 
 ### Autonomy config
 
-`codex-sandbox/config.toml` (seeded into the volume during setup):
+Save this as `~/codex-sandbox/config.toml` (seeded into the volume during setup):
 
 ```toml
 approval_policy = "never"
@@ -268,27 +271,42 @@ sandbox_mode = "danger-full-access"
 
 ### Launcher
 
-`bin/codex-sandbox`:
+Save this as `~/.local/bin/codex-sandbox`, then `chmod 755 ~/.local/bin/codex-sandbox`:
 
 ```bash
 #!/bin/bash
 # codex-sandbox — run Codex CLI sandboxed in the current directory.
-# Codex has no self-updater: check the npm registry for a newer version
-# and rebuild the image if one exists (cached no-op otherwise).
+# Codex has no self-updater: check the npm registry for a newer version and
+# rebuild the image only when the version actually changed (tracked via an
+# image label). Prints progress when rebuilding; silent when up to date.
 # Uses jq if present, with a grep fallback so no host dependency is required.
+
+# Where the Dockerfile directory created above lives — must be an absolute
+# path, since this script runs from arbitrary project directories.
+SANDBOX_SRC="${CODEX_SANDBOX_SRC:-$HOME/codex-sandbox}"
 
 CONFIG_VOL="codex-config-$USER"
 docker volume create "$CONFIG_VOL" >/dev/null
 
 LATEST=$(curl -fsSL https://registry.npmjs.org/@openai/codex/latest 2>/dev/null \
   | { jq -r .version 2>/dev/null || grep -o '"version":"[^"]*"' | head -1 | cut -d'"' -f4; })
+
 if [ -n "$LATEST" ] && [ "$LATEST" != "null" ]; then
-  docker build -q --build-arg CODEX_VERSION="$LATEST" \
-    --build-arg UID=$(id -u) --build-arg GID=$(id -g) \
-    -t codex-sandbox-$USER ./codex-sandbox >/dev/null 2>&1 \
-    || docker build -q --build-arg CODEX_VERSION="$LATEST" \
-       --build-arg UID=$(id -u) --build-arg GID=$(id -g) \
-       -t codex-sandbox-$USER ~/codex-sandbox >/dev/null
+  CURRENT=$(docker image inspect -f '{{index .Config.Labels "codex_version"}}' \
+    "codex-sandbox-$USER" 2>/dev/null)
+  if [ "$LATEST" != "$CURRENT" ]; then
+    if [ -f "$SANDBOX_SRC/Dockerfile" ]; then
+      echo "codex-sandbox: new Codex version $LATEST available (have: ${CURRENT:-none}); rebuilding image — this can take a minute..." >&2
+      docker build -q --build-arg CODEX_VERSION="$LATEST" \
+        --build-arg UID=$(id -u) --build-arg GID=$(id -g) \
+        --label "codex_version=$LATEST" \
+        -t "codex-sandbox-$USER" "$SANDBOX_SRC" >/dev/null \
+        && echo "codex-sandbox: now on Codex $LATEST" >&2 \
+        || echo "codex-sandbox: WARNING: rebuild failed; running existing image" >&2
+    else
+      echo "codex-sandbox: WARNING: Codex $LATEST available but Dockerfile not found at $SANDBOX_SRC (set CODEX_SANDBOX_SRC); running existing image" >&2
+    fi
+  fi
 else
   echo "codex-sandbox: WARNING: npm version check failed; running existing image without update check" >&2
 fi
@@ -302,10 +320,15 @@ exec docker run -it --rm \
   codex-sandbox-$USER codex "$@"
 ```
 
-> Adjust the Dockerfile path in the build commands to wherever you keep this
-> repo checked out (the example tries `./codex-sandbox` then `~/codex-sandbox`).
-> If launch-time version checks annoy you, move the check-and-rebuild block
-> into a nightly cron and let the launcher just `docker run`.
+> The default `SANDBOX_SRC` matches the `~/codex-sandbox` location used above;
+> if you put the Dockerfile elsewhere, edit that line or export
+> `CODEX_SANDBOX_SRC`. If launch-time version checks annoy you, move the
+> check-and-rebuild block into a nightly cron and let the launcher just
+> `docker run`. Note the version comparison relies on the `codex_version`
+> image label: an image built without it (e.g., by the plain initial build
+> below, or from an older version of these instructions) triggers one extra
+> rebuild — mostly cache hits, quick — after which the label exists and
+> up-to-date launches skip the build entirely.
 
 ### Setup (per user)
 
@@ -313,10 +336,10 @@ exec docker run -it --rm \
 # 1. Initial build — per user, matching your UID (deliberate first build,
 #    so the first login doesn't hide a slow image compile)
 docker build --build-arg UID=$(id -u) --build-arg GID=$(id -g) \
-  -t codex-sandbox-$USER ./codex-sandbox
+  -t codex-sandbox-$USER ~/codex-sandbox
 
-# 2. Install the launcher
-install -D -m 755 bin/codex-sandbox ~/.local/bin/codex-sandbox
+# 2. Verify the launcher is in place and executable (created above)
+which codex-sandbox   # should print ~/.local/bin/codex-sandbox
 
 # 3. Authenticate (one-time; device code, approve at chatgpt.com)
 cd ~/some-project
@@ -327,7 +350,7 @@ codex-sandbox login --device-auth
 #    or on a fresh volume, the whole directory — ends up root-owned and Codex
 #    can't write its state DB)
 docker run --rm -v "codex-config-$USER:/cfg" \
-  -v "$PWD/codex-sandbox/config.toml:/src/config.toml:ro" \
+  -v "$HOME/codex-sandbox/config.toml:/src/config.toml:ro" \
   node:24-slim sh -c "cp /src/config.toml /cfg/ && chown -R $(id -u):$(id -g) /cfg"
 ```
 
@@ -338,8 +361,18 @@ cd ~/some-project
 codex-sandbox            # full autonomy via config.toml; no flag needed
 ```
 
-tmux wrapping is identical to the Claude section. There is no Remote Control
-equivalent for Codex — remote steering is SSH + tmux.
+In tmux (note the command differs from the Claude version — no flag, since
+autonomy comes from `config.toml`):
+
+```bash
+tmux new-session -s "codex-$(basename "$PWD")" -c "$PWD" \
+  'codex-sandbox; ec=$?; \
+   if [ $ec -ne 0 ]; then echo "exited with status $ec — press Enter to close"; read; fi'
+```
+
+Same mechanics as the Claude tmux section: you're attached immediately, `Ctrl-b d` detaches leaving it running, `tmux attach -t codex-<project>` reattaches, quitting Codex normally (`/exit`) ends the tmux session, and the pane waits for Enter only after an error exit. Add `-d` to start in the background without attaching.
+
+There is no Remote Control equivalent for Codex — remote steering is SSH + tmux.
 
 ---
 
@@ -361,7 +394,7 @@ The images deliberately omit occasional-use toolchains (Java, Go, etc.). Project
 ## Multiple sessions and multiple users
 
 - **Concurrent sessions (one user):** fully supported. Containers are independent; the shared volumes tolerate concurrency (this is the same as running the agent in several terminal tabs). The only real hazard is two sessions editing the *same checkout* — use `git worktree` for parallel work on one repo.
-- **Multiple users (shared rootful Docker):** the `$USER`-namespaced volumes prevent *accidental* cross-user interference. They do **not** prevent deliberate access: anyone in the `docker` group can mount anyone's volume, because docker-group membership on a rootful daemon is root-equivalent. Treat this configuration as *collision-proof, not confidential*. If users on the box aren't mutually trusted with each other's agent credentials, use [rootless Docker](https://docs.docker.com/engine/security/rootless/) per user instead — every user gets an isolated daemon and truly private volumes, and everything in this repo works identically (drop the `$USER` suffixes if you like).
+- **Multiple users (shared rootful Docker):** the `$USER`-namespaced volumes prevent *accidental* cross-user interference. They do **not** prevent deliberate access: anyone in the `docker` group can mount anyone's volume, because docker-group membership on a rootful daemon is root-equivalent. Treat this configuration as *collision-proof, not confidential*. If users on the box aren't mutually trusted with each other's agent credentials, use [rootless Docker](https://docs.docker.com/engine/security/rootless/) per user instead — every user gets an isolated daemon and truly private volumes, and these instructions work identically (drop the `$USER` suffixes if you like).
 - **Why images are per-user too:** the container's `agent` user must have *your* UID, or the bind-mounted `/workspace` (owned by you on the host) isn't writable from inside — the agent will report something like "couldn't save, /workspace is owned by UID 1003 but this session runs as UID 1001." That's why every build command passes `--build-arg UID=$(id -u) --build-arg GID=$(id -g)` and tags the image `*-$USER`. Docker layer caching keeps this cheap: users with identical Dockerfiles share all layers up to the `useradd`.
 - **Troubleshooting UID mismatches on existing volumes:** if you built an image before setting the UID args (or your UID changed), your volumes may contain files owned by the old UID and the agent can't write its own config. Symptoms include the `/workspace is owned by UID X but this session runs as UID Y` message, and for Codex specifically a startup failure like `unable to open database file` for `~/.codex/state_5.sqlite` plus `could not create PATH aliases: Permission denied` — that means the *image's* agent UID and the *volume's* file ownership disagree. Verify with `docker run --rm codex-sandbox-$USER id -u` (should print your `id -u`). Fix by rebuilding the image with the UID build-args, then chowning the volumes in place without losing auth:
   ```bash

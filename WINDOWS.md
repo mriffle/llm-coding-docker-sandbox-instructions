@@ -1,6 +1,6 @@
 # Windows Setup
 
-How to run the Claude Code and Codex CLI Docker sandboxes from this repository on a Windows machine.
+How to set up the Claude Code and Codex CLI Docker sandboxes from these instructions on a Windows machine. Like the main README, this is a read-along guide — you create the files on your system; nothing needs to be cloned.
 
 The good news up front: because both agents run **inside Linux containers**, Windows only has to play host — you never install Claude Code or Codex natively on Windows at all. The images, launchers, volumes, auth flows, and security model from the main [README](README.md) apply unchanged. What this page covers is the Windows-specific plumbing: getting Docker, choosing where your files live, and two ways to run the launchers.
 
@@ -50,24 +50,13 @@ You can still open these files from Windows apps: VS Code's WSL integration does
 
 ### 4. Follow the main README
 
-From here, everything proceeds exactly as documented — you're on Linux now:
-
-```bash
-cd ~
-git clone <this-repo> agent-sandboxes
-cd agent-sandboxes
-
-# PATH setup: see "Before you start" in README.md
-docker build -t claude-sandbox ./claude-sandbox
-install -D -m 755 bin/claude-sandbox ~/.local/bin/claude-sandbox
-# ...and so on, per the README
-```
+From here, everything proceeds exactly as documented — you're on Linux now. Work through the main [README](README.md) from the top ("Before you start" for PATH setup, then each agent's section), creating the Dockerfiles and launcher scripts in your WSL home (`~/claude-sandbox/`, `~/codex-sandbox/`, `~/.local/bin/`) exactly as it describes.
 
 tmux works, device-code auth flows work (open the URL in your Windows browser — same machine, no "another device" needed), and per-user volume namespacing behaves as on any Linux host. One nuance: WSL is typically single-user, so the `$USER` suffixes are less load-bearing than on a shared server — harmless to keep for consistency with the shared setup.
 
 ### WSL-specific gotchas
 
-- **Line endings.** If you clone this repo from *Windows* git and then run the scripts in WSL, Windows git may have converted the bash scripts to CRLF line endings, which breaks them with confusing errors like `/bin/bash^M: bad interpreter` or `$'\r': command not found`. Avoid it by cloning inside WSL (recommended), or fix a converted file with `sed -i 's/\r$//' bin/claude-sandbox`. Repo maintainers can prevent it entirely with a `.gitattributes` containing `*.sh text eol=lf` and `bin/* text eol=lf`.
+- **Line endings.** Create the bash scripts *inside* WSL (nano/vim in the Ubuntu terminal, or VS Code's WSL mode). If you paste them via a Windows editor that saves CRLF line endings, they break with confusing errors like `/bin/bash^M: bad interpreter` or `$'\r': command not found`. Fix an affected file with `sed -i 's/\r$//' ~/.local/bin/claude-sandbox`.
 - **WSL shutdown.** WSL2 (and any tmux sessions and containers inside it) stops when Windows reboots, and WSL may auto-suspend when no terminal is open. For long-running agent sessions, keep a terminal window open, or configure `wsl.exe` keep-alive approaches; a laptop that sleeps will pause sessions regardless, same as native Linux.
 - **Memory.** WSL2's VM can grow large with heavy builds. Cap it if needed with a `%UserProfile%\.wslconfig` file:
   ```ini
@@ -89,13 +78,13 @@ Install from docker.com with default settings (WSL2 backend). Verify in PowerShe
 docker run --rm hello-world
 ```
 
-### 2. Build the images
+### 2. Create the Dockerfiles and build the images
 
-From a clone of this repo (Windows git is fine here — Dockerfiles are line-ending tolerant, and the bash launchers aren't used in this route):
+Create `$HOME\claude-sandbox\Dockerfile` and `$HOME\codex-sandbox\Dockerfile` with the contents from the main README (any Windows editor is fine here — Dockerfiles are line-ending tolerant, and the bash launchers aren't used in this route). Also save the Codex `config.toml` from the README as `$HOME\codex-sandbox\config.toml`. Then:
 
 ```powershell
-docker build -t claude-sandbox .\claude-sandbox
-docker build -t codex-sandbox .\codex-sandbox
+docker build -t claude-sandbox "$HOME\claude-sandbox"
+docker build -t codex-sandbox "$HOME\codex-sandbox"
 ```
 
 ### 3. PowerShell launchers
@@ -133,12 +122,12 @@ $ConfigVol = "codex-config-$env:USERNAME"
 docker volume create $ConfigVol | Out-Null
 
 # Codex has no self-updater: rebuild image if npm has a newer version
-# (cached no-op otherwise). Adjust the repo path to your clone location.
+# (cached no-op otherwise). Path matches the $HOME\codex-sandbox convention.
 try {
   $Latest = (Invoke-RestMethod "https://registry.npmjs.org/@openai/codex/latest").version
   if ($Latest) {
     docker build -q --build-arg CODEX_VERSION=$Latest `
-      -t codex-sandbox "$HOME\agent-sandboxes\codex-sandbox" | Out-Null
+      -t codex-sandbox "$HOME\codex-sandbox" | Out-Null
   }
 } catch { }
 
@@ -177,8 +166,8 @@ claude-sandbox.ps1 --dangerously-skip-permissions   # accept the dialog
 
 codex-sandbox.ps1 login --device-auth
 docker run --rm -v "codex-config-$env:USERNAME:/cfg" `
-  -v "${PWD}\codex-sandbox\config.toml:/src/config.toml:ro" `
-  node:24-slim sh -c "cp /src/config.toml /cfg/ && chown -R 1001:1001 /cfg"   # run from the repo clone
+  -v "$HOME\codex-sandbox\config.toml:/src/config.toml:ro" `
+  node:24-slim sh -c "cp /src/config.toml /cfg/ && chown -R 1001:1001 /cfg"
 # (the chown prevents root-owned volume contents, which break Codex's state DB;
 #  1001 is the image's default agent UID — named volumes have real Linux
 #  ownership even on Docker Desktop, unlike Windows bind mounts)
