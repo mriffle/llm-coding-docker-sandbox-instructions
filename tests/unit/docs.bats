@@ -63,10 +63,31 @@ RAW_BASE="https://raw.githubusercontent.com/mriffle/llm-coding-docker-sandbox-in
 
 @test "every -Flag the README documents is a real PowerShell parameter" {
     local flag
-    for flag in Check Force Uninstall Purge Prefix; do
+    for flag in Check Force Uninstall Purge Prefix PrintPath; do
         grep -q "\[switch\]\$$flag\|\[string\]\$$flag" "$REPO_ROOT/install/claude.ps1" \
             || fail_with "README documents -$flag but claude.ps1 has no such parameter"
     done
+}
+
+# The README tells people to wrap the installer in eval. That only works while
+# the installer actually emits the line, and while nothing else reaches stdout.
+@test "the eval form the README documents is a thing the installers support" {
+    grep -qF 'eval "$(curl -fsSL' "$REPO_ROOT/README.md" \
+        || fail_with "README no longer documents the eval install form"
+    local agent
+    for agent in claude codex; do
+        grep -q 'emit_shell_eval' "$REPO_ROOT/install/$agent.sh" \
+            || fail_with "$agent.sh does not emit the PATH line the README promises"
+        grep -qF 'tee "$log" >&2' "$REPO_ROOT/install/$agent.sh" \
+            || fail_with "$agent.sh lets the docker build stream reach stdout, breaking eval"
+    done
+}
+
+@test "the README's paste-me PATH line is the one the installer prints" {
+    grep -qF 'export PATH="$HOME/.local/bin:$PATH"' "$REPO_ROOT/README.md" \
+        || fail_with "README no longer shows the export line the installer prints"
+    grep -qF 'PATH_EXPORT_LINE="export PATH=' "$REPO_ROOT/install/claude.sh" \
+        || fail_with "the installer no longer builds that line"
 }
 
 @test "the persistence table names the volumes the installers actually create" {

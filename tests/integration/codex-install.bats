@@ -139,6 +139,20 @@ MANIFEST() { printf '%s/.local/share/agent-sandbox/codex.manifest' "$HOME"; }
     [ "$(grep -c 'agent-sandbox installer' "$HOME/.bashrc")" -eq 1 ]
 }
 
+# The second agent finds the rc file already edited and writes nothing — but
+# the launcher is still un-runnable in this shell, and saying nothing there is
+# exactly the gap that made the first install look like it had worked and the
+# second like it had not.
+@test "installing the second agent still explains how to run it now" {
+    PATH=$(path_excluding "$HOME/.local/bin")
+    run_install claude
+    assert_success
+    run_install codex
+    assert_success
+    assert_output_contains 'Make codex-sandbox runnable in this terminal'
+    assert_output_contains 'export PATH="$HOME/.local/bin:$PATH"'
+}
+
 @test "re-running the installer picks up a new Codex release" {
     FAKE_CODEX_VERSION=0.44.0 run_install codex
     assert_success

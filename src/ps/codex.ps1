@@ -12,6 +12,7 @@ param(
     [switch]$Yes,
     [switch]$NoBuild,
     [switch]$NoPathEdit,
+    [switch]$PrintPath,
     [switch]$Quiet,
     [switch]$Version,
     [switch]$Help,
@@ -121,9 +122,7 @@ function Remove-AgentExtra {
 function Show-NextSteps {
     Say ''
     Say 'Next steps'
-    if ($script:PathWasEdited) {
-        Say '  0. Open a new terminal so the PATH change takes effect.'
-    }
+    Write-PathStep
     Say '  1. Log in once — device code, approve at chatgpt.com from any device:'
     Say '       cd C:\code\some-project'
     Say '       codex-sandbox login --device-auth'
@@ -147,6 +146,9 @@ function Invoke-Main {
     $script:NoPathEdit = [bool]$NoPathEdit
     $script:Quiet      = [bool]$Quiet
     $script:PathWasEdited = $false
+    $script:PrintPath = [bool]$PrintPath
+    $script:PathNeedsReload = $false
+    $script:PathExportLine = ''
     $script:ForceBuild = $false
     $script:ForceBuildReason = ''
 

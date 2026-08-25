@@ -27,10 +27,7 @@ VOLUME_BASENAMES="claude-config claude-local"
 print_next_steps() {
     say ""
     say "${C_BOLD}Next steps${C_RESET}"
-    if [ -n "${PATH_NEEDS_RELOAD:-}" ]; then
-        say "  0. Pick up the new PATH:  source $PATH_NEEDS_RELOAD"
-        say "     (new terminals get it automatically)"
-    fi
+    print_path_step
     say "  1. Log in once — the token persists in claude-config-$(sandbox_user):"
     say "       cd ~/some-project && claude-sandbox"
     say "     On a headless server, open the printed URL in a browser anywhere,"

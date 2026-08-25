@@ -57,6 +57,56 @@ MANIFEST() { printf '%s/.local/share/agent-sandbox/claude.manifest' "$HOME"; }
     [ "$(grep -c 'agent-sandbox installer' "$HOME/.bashrc")" -eq 1 ]
 }
 
+# What the user does next has to work without opening a new terminal — the
+# installer cannot change its parent shell's PATH, so it has to say how.
+@test "a fresh install says how to make the launcher runnable right now" {
+    PATH=$(path_excluding "$HOME/.local/bin")
+    run_install claude
+    assert_success
+    assert_output_contains 'Make claude-sandbox runnable in this terminal'
+    assert_output_contains 'export PATH="$HOME/.local/bin:$PATH"'
+}
+
+# Nothing but the PATH command may reach stdout — every diagnostic, the docker
+# build stream included, belongs on stderr. This is what makes the eval form
+# below safe rather than a mouthful of shell being handed to the caller.
+@test "stdout carries the PATH command and nothing else" {
+    PATH=$(path_excluding "$HOME/.local/bin")
+    local out
+    out=$(bash "$(installer claude)" 2>/dev/null)
+    [ "$out" = 'export PATH="$HOME/.local/bin:$PATH"' ] \
+        || fail_with "unexpected stdout: [$out]"
+}
+
+@test "eval-ing the installer makes the launcher runnable in the same shell" {
+    PATH=$(path_excluding "$HOME/.local/bin")
+    eval "$(bash "$(installer claude)" 2>/dev/null)"
+    run command -v claude-sandbox
+    assert_success
+    [ "$output" = "$HOME/.local/bin/claude-sandbox" ] \
+        || fail_with "expected the installed launcher, got: $output"
+}
+
+@test "an already-current PATH means nothing on stdout to eval" {
+    run_install claude
+    assert_success
+    local out
+    out=$(PATH="$HOME/.local/bin:$PATH" bash "$(installer claude)" 2>/dev/null)
+    [ -z "$out" ] || fail_with "expected empty stdout, got: [$out]"
+}
+
+# ~/.bashrc is not read by a login shell — which is what a fresh Terminal
+# window on macOS and every ssh session into a shared box gives you.
+@test "a login shell that never reads .bashrc still finds the launcher" {
+    PATH=$(path_excluding "$HOME/.local/bin")
+    printf '# my bash_profile\n' > "$HOME/.bash_profile"
+    run_install claude
+    assert_success
+    run env -i HOME="$HOME" PATH="$PATH" bash -lc 'command -v claude-sandbox'
+    assert_success
+    assert_output_contains "$HOME/.local/bin/claude-sandbox"
+}
+
 @test "fresh install prints the login and bypass-dialog next steps" {
     run_install claude
     assert_output_contains 'Log in once'

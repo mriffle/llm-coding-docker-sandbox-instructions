@@ -158,6 +158,82 @@ teardown() { common_teardown; }
     assert_file_missing "$HOME/.bashrc"
 }
 
+# The launcher being un-runnable in this shell, and an rc file needing an edit,
+# are different conditions. Installing the second agent is the case where they
+# diverge: the marker is already there, nothing is written, and the caller still
+# cannot type the launcher's name.
+@test "ensure_on_path reports a stale shell PATH even when the rc file is already set up" {
+    PATH=$(path_excluding "$HOME/.local/bin")
+    ensure_on_path "$HOME/.local/bin"
+    [ -n "$PATH_NEEDS_RELOAD" ]
+
+    PATH_NEEDS_RELOAD=''; PATH_EXPORT_LINE=''
+    ensure_on_path "$HOME/.local/bin"
+    [ -n "$PATH_NEEDS_RELOAD" ] \
+        || fail_with "second install said nothing, leaving the launcher un-runnable"
+    [ "$PATH_EXPORT_LINE" = 'export PATH="$HOME/.local/bin:$PATH"' ] \
+        || fail_with "unexpected export line: $PATH_EXPORT_LINE"
+}
+
+@test "--no-path-edit still yields a command the user can run by hand" {
+    PATH=$(path_excluding "$HOME/.local/bin")
+    NO_PATH_EDIT=1 ensure_on_path "$HOME/.local/bin"
+    assert_file_missing "$HOME/.bashrc"
+    [ "$PATH_EXPORT_LINE" = 'export PATH="$HOME/.local/bin:$PATH"' ]
+}
+
+# The line re-checks $PATH at shell start, which is what makes it safe to have
+# in two rc files at once — and stops it stacking on the copy Debian's stock
+# ~/.profile adds by itself once ~/.local/bin exists.
+@test "the PATH line it writes never stacks a second copy" {
+    PATH=$(path_excluding "$HOME/.local/bin")
+    ensure_on_path "$HOME/.local/bin"
+    cat > "$TESTDIR/count.sh" <<'SH'
+. "$HOME/.bashrc"
+. "$HOME/.bashrc"
+printf '%s' "$PATH" | tr ':' '\n' | grep -cxF "$HOME/.local/bin"
+SH
+    run bash "$TESTDIR/count.sh"
+    assert_success
+    [ "$output" = 1 ] || fail_with "expected 1 PATH entry after sourcing twice, got $output"
+}
+
+# A bash login shell — every new Terminal window on macOS, every ssh session —
+# reads ~/.bash_profile and never ~/.bashrc unless that file sources it. The
+# fixture mentions .bashrc in a comment on purpose: a bare mention is not a
+# source, and reading it as one is how this silently regresses.
+@test "a bash login file that never sources .bashrc gets the block too" {
+    PATH=$(path_excluding "$HOME/.local/bin")
+    printf '# mine, and it does not source .bashrc\n' > "$HOME/.bash_profile"
+    SHELL=/bin/bash ensure_on_path "$HOME/.local/bin"
+    assert_file_contains "$HOME/.bashrc" 'agent-sandbox installer'
+    assert_file_contains "$HOME/.bash_profile" 'agent-sandbox installer'
+}
+
+@test "a login file that already sources .bashrc is left alone" {
+    PATH=$(path_excluding "$HOME/.local/bin")
+    printf 'if [ -f "$HOME/.bashrc" ]; then\n    . "$HOME/.bashrc"\nfi\n' > "$HOME/.profile"
+    SHELL=/bin/bash ensure_on_path "$HOME/.local/bin"
+    assert_file_contains "$HOME/.bashrc" 'agent-sandbox installer'
+    refute_file_contains "$HOME/.profile" 'agent-sandbox installer'
+}
+
+@test "the RHEL one-liner form counts as sourcing .bashrc" {
+    PATH=$(path_excluding "$HOME/.local/bin")
+    printf '[ -f ~/.bashrc ] && . ~/.bashrc\n' > "$HOME/.bash_profile"
+    SHELL=/bin/bash ensure_on_path "$HOME/.local/bin"
+    refute_file_contains "$HOME/.bash_profile" 'agent-sandbox installer'
+}
+
+# No dotfiles at all: a login shell would read none of the three, so one has
+# to be created or the PATH entry is never picked up.
+@test "with no dotfiles at all, a login-shell rc file is created" {
+    PATH=$(path_excluding "$HOME/.local/bin")
+    SHELL=/bin/bash ensure_on_path "$HOME/.local/bin"
+    assert_file_contains "$HOME/.profile" 'agent-sandbox installer'
+    assert_file_contains "$HOME/.bashrc" 'agent-sandbox installer'
+}
+
 @test "install_asset creates, then reports unchanged, then updates" {
     mkdir -p "$SRC_DIR"
     install_asset "$SRC_DIR/Dockerfile" 644 "FROM one" dockerfile_sha

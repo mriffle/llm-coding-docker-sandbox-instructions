@@ -105,6 +105,24 @@ runs under `pwsh` on the Linux runner.
 - Hash embedded assets with `asset_sha`, not `sha256_string`: `atomic_write`
   appends a newline that `$(cat <<EOF)` stripped, so the raw string never
   matches the file and nothing ever compares as unchanged.
+- **`~/.bashrc` is not read by a login shell.** A new Terminal window on macOS
+  and every ssh session read `~/.bash_profile`/`~/.bash_login`/`~/.profile`
+  instead. Writing the PATH block only to `~/.bashrc` made "new terminals get
+  it automatically" a promise the installer did not keep. `login_rc_file`
+  covers the second file, and the block is self-guarding so having it in both
+  never stacks a PATH entry.
+- **"Did I edit an rc file?" is not "is the launcher runnable?"** Installing
+  the second agent finds the marker already present and writes nothing — and
+  used to say nothing, leaving the launcher un-runnable with no explanation.
+  `PATH_NEEDS_RELOAD` keys off the *current* `$PATH`, not off having written.
+- **stdout is a contract.** The installers emit the `export PATH=…` line, and
+  nothing else, on stdout so that `eval "$(curl … | bash)"` works; every
+  diagnostic goes to stderr. The docker build stream is the one that keeps
+  trying to leak — `tee "$log" >&2` in `build_image`, and
+  `| ForEach-Object { [Console]::Error.WriteLine($_) }` in `Invoke-Build`.
+  PowerShell needs the explicit `-PrintPath` switch instead of an
+  is-it-captured test: its success stream reaches `| iex` without the
+  process's stdout ever being redirected.
 
 ## Docs
 

@@ -27,6 +27,18 @@ irm https://raw.githubusercontent.com/mriffle/llm-coding-docker-sandbox-instruct
 irm https://raw.githubusercontent.com/mriffle/llm-coding-docker-sandbox-instructions/main/install/codex.ps1  | iex
 ```
 
+The installer puts the launcher in `~/.local/bin`, and no script can change
+the `PATH` of the shell that ran it. If that directory wasn't already on your
+`PATH`, wrap the command in `eval` and it will be:
+
+```bash
+eval "$(curl -fsSL https://raw.githubusercontent.com/mriffle/llm-coding-docker-sandbox-instructions/main/install/claude.sh | bash)"
+```
+
+Everything the installer prints goes to stderr, so the only thing `eval` ever
+sees is the one `export PATH=...` line — and only when it is needed. Run it
+without `eval` and the installer prints that line for you to paste instead.
+
 Install either agent, or both — they share nothing but the `PATH` entry. See [WINDOWS.md](WINDOWS.md) for which Windows route to pick (WSL2 is recommended, and uses the bash installers above).
 
 **Docker is the only prerequisite,** and you don't have to work out how to get it: if it's missing or unreachable, the installer stops and prints the exact commands for your system — `apt-get`/`dnf`/`pacman` with the docker-group step on Linux, `brew install --cask docker` (or colima, or OrbStack) on macOS, `winget install Docker.DockerDesktop` on Windows, and the Docker Desktop WSL-integration toggle inside WSL. It also tells apart "not installed", "daemon not running" and "you're not in the docker group", because the fix differs.
@@ -41,7 +53,19 @@ claude-sandbox --dangerously-skip-permissions      # accept the bypass dialog on
 codex-sandbox login --device-auth                  # device code, approve at chatgpt.com
 ```
 
-If the installer had to add `~/.local/bin` to your `PATH`, open a new terminal (or `source ~/.bashrc`) before these work by name.
+If the installer had to add `~/.local/bin` to your `PATH`, it says so and
+prints the one line that fixes the terminal you are in:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+New terminals pick it up from your shell's rc file. For bash that means
+`~/.bashrc`, plus `~/.bash_profile` (or `~/.profile`) when that file exists and
+doesn't source `~/.bashrc` — otherwise a login shell, which is what a new
+Terminal window on macOS and every ssh session gives you, would never read it.
+The line the installer writes re-checks `$PATH` at shell start, so it is
+harmless in both files and never stacks a second copy.
 
 ## Daily use
 
@@ -127,7 +151,7 @@ curl -fsSL .../install/claude.sh | bash -s -- --uninstall   # remove files and i
 curl -fsSL .../install/claude.sh | bash -s -- --uninstall --purge   # also delete the volumes
 ```
 
-`--uninstall` deliberately leaves the named volumes alone, so uninstalling doesn't log you out. `--purge` deletes them and asks first. Other flags: `--force`, `--prefix DIR`, `--src-dir DIR`, `--no-build`, `--no-path-edit`, `--yes`, `--quiet`, `--help`. In PowerShell they're `-Check`, `-Uninstall`, `-Purge`, `-Force`, `-Prefix`, and so on; because a piped script can't take arguments, use:
+`--uninstall` deliberately leaves the named volumes alone, so uninstalling doesn't log you out. `--purge` deletes them and asks first. Other flags: `--force`, `--prefix DIR`, `--src-dir DIR`, `--no-build`, `--no-path-edit`, `--yes`, `--quiet`, `--help`. In PowerShell they're `-Check`, `-Uninstall`, `-Purge`, `-Force`, `-Prefix`, `-PrintPath`, and so on; because a piped script can't take arguments, use:
 
 ```powershell
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/mriffle/llm-coding-docker-sandbox-instructions/main/install/claude.ps1))) -Check
@@ -146,7 +170,9 @@ curl -fsSL .../install/claude.sh | bash -s -- --uninstall --purge   # also delet
 
 On native Windows the launchers land in `%USERPROFILE%\bin` as a `.ps1` plus a `.cmd` shim (so they work from `cmd.exe` and never trip PowerShell's execution policy), and the manifest lives under `%LOCALAPPDATA%\agent-sandbox`.
 
-Nothing outside these paths is touched, except one guarded two-line block appended to your shell rc file if `~/.local/bin` isn't already on `PATH`.
+Nothing outside these paths is touched, except one guarded two-line block appended to your shell rc file if `~/.local/bin` isn't already on `PATH` — and to your login rc file as well when that one wouldn't otherwise read it.
+
+`-PrintPath` is the PowerShell counterpart to the `eval` form above; it writes the session's `PATH` command to the success stream so `... -PrintPath | iex` makes the launcher runnable at once. It needs the explicit switch because PowerShell's success stream reaches `| iex` without the process's stdout ever being redirected, so there is no "am I being captured" test to key off.
 
 ### What persists where
 

@@ -134,6 +134,42 @@ ps_install() {
     [ "$(tr ';' '\n' < "$SANDBOX_FAKE_USERPATH_FILE" | grep -c "^$HOME/bin$")" -eq 1 ]
 }
 
+@test "ps: says how to make the launcher runnable in this session" {
+    ps_install claude
+    assert_success
+    assert_output_contains 'Make claude-sandbox runnable in this terminal'
+    assert_output_contains '$env:Path = "$env:Path;'
+}
+
+# The persisted user PATH is already correct by the time the second agent is
+# installed; the session's PATH is not. Keying off the wrong one is what left
+# the second launcher un-runnable with nothing said about it.
+@test "ps: installing the second agent still explains how to run it now" {
+    ps_install claude
+    assert_success
+    ps_install codex
+    assert_success
+    assert_output_contains 'Make codex-sandbox runnable in this terminal'
+}
+
+# PowerShell's success stream reaches `| iex` without the process's stdout ever
+# being redirected, so unlike the shell installers this needs an explicit
+# switch rather than an is-it-captured test.
+@test "ps: -PrintPath puts the session PATH command on the success stream" {
+    local out
+    out=$("$PWSH" -NoProfile -File "$REPO_ROOT/install/claude.ps1" -PrintPath 2>/dev/null)
+    case "$out" in
+        '$env:Path = "$env:Path;'*"$HOME/bin"'"') ;;
+        *) fail_with "unexpected success-stream output: [$out]" ;;
+    esac
+}
+
+@test "ps: without -PrintPath the success stream stays empty" {
+    local out
+    out=$("$PWSH" -NoProfile -File "$REPO_ROOT/install/claude.ps1" 2>/dev/null)
+    [ -z "$out" ] || fail_with "expected empty success stream, got: [$out]"
+}
+
 @test "ps: re-running changes nothing and does not rebuild" {
     ps_install claude
     : > "$FAKE_DOCKER_LOG"

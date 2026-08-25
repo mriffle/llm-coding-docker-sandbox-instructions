@@ -12,6 +12,7 @@ param(
     [switch]$Yes,
     [switch]$NoBuild,
     [switch]$NoPathEdit,
+    [switch]$PrintPath,
     [switch]$Quiet,
     [switch]$Version,
     [switch]$Help,
@@ -38,9 +39,7 @@ $script:VolumeBasenames  = @('claude-config', 'claude-local')
 function Show-NextSteps {
     Say ''
     Say 'Next steps'
-    if ($script:PathWasEdited) {
-        Say '  0. Open a new terminal so the PATH change takes effect.'
-    }
+    Write-PathStep
     Say "  1. Log in once — the token persists in claude-config-$(Get-SandboxUser):"
     Say '       cd C:\code\some-project'
     Say '       claude-sandbox'
@@ -66,6 +65,9 @@ function Invoke-Main {
     $script:NoPathEdit = [bool]$NoPathEdit
     $script:Quiet      = [bool]$Quiet
     $script:PathWasEdited = $false
+    $script:PrintPath = [bool]$PrintPath
+    $script:PathNeedsReload = $false
+    $script:PathExportLine = ''
     $script:ForceBuild = $false
     $script:ForceBuildReason = ''
 

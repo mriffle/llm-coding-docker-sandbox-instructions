@@ -66,6 +66,14 @@ source ~/.bashrc
 
 (If your shell is zsh, use `~/.zshrc` instead of `~/.bashrc`. The `source` command applies the change to your current terminal; new terminals pick it up automatically. Note for Debian/Ubuntu users: the default `~/.profile` already adds `~/.local/bin` to PATH *if the directory exists* — but only at login, so after `mkdir` you'd still need to log out and back in. The `~/.bashrc` line above works immediately and unconditionally.)
 
+One caveat if you keep your own dotfiles: a bash **login** shell — a new Terminal window on macOS, every ssh session — reads `~/.bash_profile`, `~/.bash_login` or `~/.profile`, and never `~/.bashrc` unless one of those sources it. If yours doesn't, add the same line to whichever of those files you have, or `~/.bashrc` will be read only by non-login shells and `command not found` will follow you into every new session. Making the line self-guarding lets you put it in both files without stacking duplicate PATH entries:
+
+```bash
+case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) export PATH="$HOME/.local/bin:$PATH" ;; esac
+```
+
+(This is exactly what the automated installers write, and why.)
+
 **Step 3 — verify:**
 
 ```bash

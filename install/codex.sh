@@ -440,6 +440,8 @@ path_has_dir() {
     case ":$PATH:" in *":$1:"*) return 0 ;; *) return 1 ;; esac
 }
 
+# The file an *interactive* shell reads. bash also has login shells, which read
+# something else entirely — see login_rc_file.
 rc_file_for_shell() {
     local shell_name
     shell_name=$(basename "${SHELL:-/bin/bash}")
@@ -450,38 +452,123 @@ rc_file_for_shell() {
     esac
 }
 
+# A bash *login* shell — every new Terminal window on macOS, every ssh session
+# into a shared box — reads the first of these that exists and never touches
+# ~/.bashrc unless that file sources it. Writing only to ~/.bashrc there is how
+# "new terminals get it automatically" turns into a promise the installer does
+# not keep. Prints nothing when the interactive rc already covers the case.
+login_rc_file() {
+    local f
+    [ "$(basename "${SHELL:-/bin/bash}")" = bash ] || return 0
+    for f in "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile"; do
+        [ -f "$f" ] || continue
+        # Sources ~/.bashrc (as Debian's stock ~/.profile does)? Then the block
+        # already written there is read, and a second copy would be noise.
+        # It has to be an actual `.` or `source` command: a bare mention —
+        # "# does not source .bashrc" — must not count, and comments are
+        # stripped before looking. Both spellings and the `[ -f ~/.bashrc ] &&
+        # . ~/.bashrc` one-liner are covered.
+        if sed 's/#.*//' "$f" 2>/dev/null \
+           | grep -Eq '(^|[[:space:]]|;|&|\|)(\.|source)[[:space:]]+[^[:space:];]*\.bashrc'; then
+            return 0
+        fi
+        printf '%s' "$f"
+        return 0
+    done
+    # None of the three exists, so a login shell would read no rc file at all.
+    # ~/.profile is the portable one to create.
+    printf '%s/.profile' "$HOME"
+}
+
 PATH_MARKER='# added by the agent-sandbox installer'
 
-# Idempotent: guarded by a marker, and skipped entirely when the directory is
-# already on PATH. Re-running the installer must never grow your rc file.
-ensure_on_path() {
-    local dir=$1 rc literal
-    if path_has_dir "$dir"; then
-        info "$dir is already on PATH"
-        return 0
-    fi
-    if [ -n "${NO_PATH_EDIT:-}" ]; then
-        warn "$dir is not on PATH and --no-path-edit was given; add it yourself"
-        return 0
-    fi
-    rc=$(rc_file_for_shell)
+# Self-guarding, so the same line is harmless in two rc files at once and does
+# not stack a second copy on the one Debian's stock ~/.profile already adds
+# once ~/.local/bin exists.
+path_block_line() {
+    # shellcheck disable=SC2016  # $PATH and $HOME must reach the rc file unexpanded
+    printf 'case ":$PATH:" in *":%s:"*) ;; *) export PATH="%s:$PATH" ;; esac\n' "$1" "$1"
+}
+
+append_path_block() {
+    local rc=$1 dir=$2 literal=$3
     if [ -f "$rc" ] && grep -qF "$PATH_MARKER" "$rc" 2>/dev/null; then
         info "PATH entry already present in $rc"
-        RC_FILE_EDITED=$rc
         return 0
     fi
+    { printf '\n%s\n' "$PATH_MARKER"
+      path_block_line "$literal"
+    } >> "$rc" || die "could not append to $rc"
+    ok "added $dir to PATH in $rc"
+}
+
+# Idempotent: guarded by a marker per file, and the line it writes re-checks
+# $PATH at shell start, so nothing stacks however many times this runs.
+#
+# PATH_NEEDS_RELOAD is set whenever the directory is missing from the PATH of
+# the shell running the installer — not merely when an rc file was edited this
+# time round. Those differ, and the difference is a real bug: installing the
+# second agent finds the marker already present, edits nothing, and used to say
+# nothing, leaving the launcher un-runnable with no explanation.
+ensure_on_path() {
+    local dir=$1 rc login_rc literal
     case "$dir" in
         "$HOME/"*) literal="\$HOME/${dir#"$HOME"/}" ;;
         *)         literal=$dir ;;
     esac
-    # shellcheck disable=SC2016  # $PATH must reach the rc file unexpanded
-    { printf '\n%s\n' "$PATH_MARKER"
-      printf 'export PATH="%s:$PATH"\n' "$literal"
-    } >> "$rc" || die "could not append to $rc"
+
+    if path_has_dir "$dir"; then
+        info "$dir is already on PATH"
+        return 0
+    fi
+
+    # shellcheck disable=SC2034  # both are read by print_path_step / emit_shell_eval
+    PATH_NEEDS_RELOAD=1
+    PATH_EXPORT_LINE="export PATH=\"$literal:\$PATH\""
+
+    if [ -n "${NO_PATH_EDIT:-}" ]; then
+        warn "$dir is not on PATH and --no-path-edit was given; add it yourself"
+        return 0
+    fi
+
+    rc=$(rc_file_for_shell)
+    append_path_block "$rc" "$dir" "$literal"
     RC_FILE_EDITED=$rc
-    ok "added $dir to PATH in $rc"
-    # shellcheck disable=SC2034  # read by the agent's print_next_steps
-    PATH_NEEDS_RELOAD=$rc
+
+    login_rc=$(login_rc_file)
+    if [ -n "$login_rc" ] && [ "$login_rc" != "$rc" ]; then
+        append_path_block "$login_rc" "$dir" "$literal"
+        RC_FILE_EDITED="$rc and $login_rc"
+    fi
+}
+
+# Step 0 of every agent's next-steps block: printed whenever the launcher is
+# not runnable by name in the shell that ran the installer. An `export` rather
+# than `source <rc>` — it is surgical, it is correct under --no-path-edit and
+# for a shell whose rc file we did not touch, and it cannot re-run a whole rc
+# for a one-line effect.
+print_path_step() {
+    [ -n "${PATH_NEEDS_RELOAD:-}" ] || return 0
+    say "  0. Make $LAUNCHER_NAME runnable in this terminal:"
+    say "       $PATH_EXPORT_LINE"
+    if [ -n "${RC_FILE_EDITED:-}" ]; then
+        say "     New terminals pick it up from $RC_FILE_EDITED."
+    fi
+    say ""
+}
+
+# The one thing stdout is for. Every diagnostic goes to stderr, so a caller can
+# capture this script and apply what it says to its own shell:
+#
+#   eval "$(curl -fsSL .../install/claude.sh | bash)"
+#
+# and have the launcher runnable immediately, with no second step. A terminal
+# gets the human-readable instruction from print_path_step instead, so the
+# plain `| bash` form never prints a stray line of shell at anybody.
+emit_shell_eval() {
+    [ -n "${PATH_EXPORT_LINE:-}" ] || return 0
+    if [ -t 1 ]; then return 0; fi
+    printf '%s\n' "$PATH_EXPORT_LINE"
 }
 
 # ---- argument parsing -----------------------------------------------------
@@ -681,7 +768,7 @@ build_image() {
     if [ -n "${QUIET:-}" ]; then
         docker build "${args[@]}" >"$log" 2>&1; rc=$?
     else
-        docker build "${args[@]}" 2>&1 | tee "$log"; rc=${PIPESTATUS[0]}
+        docker build "${args[@]}" 2>&1 | tee "$log" >&2; rc=${PIPESTATUS[0]}
     fi
     set -e
 
@@ -777,9 +864,12 @@ do_install() {
     if [ -n "${WAS_INSTALLED:-}" ]; then
         say "  $AGENT_NAME sandbox is at v$INSTALLER_VERSION."
         say "  $LAUNCHER_NAME --sandbox-doctor    to confirm image, volumes and versions"
+        blank
+        print_path_step
     else
         print_next_steps
     fi
+    emit_shell_eval
 }
 
 do_check() {
@@ -930,7 +1020,7 @@ do_uninstall() {
     rm -f "$(manifest_path)" && ok "removed $(manifest_path)"
     if [ -n "$(manifest_get_or rc_file '')" ]; then
         blank
-        info "The PATH line in $(manifest_get_or rc_file '') was left alone; remove it by hand if you want."
+        info "The PATH line this installer added to $(manifest_get_or rc_file '') was left alone; remove it by hand if you want."
     fi
 }
 
@@ -1651,10 +1741,7 @@ agent_uninstall_extra() {
 print_next_steps() {
     say ""
     say "${C_BOLD}Next steps${C_RESET}"
-    if [ -n "${PATH_NEEDS_RELOAD:-}" ]; then
-        say "  0. Pick up the new PATH:  source $PATH_NEEDS_RELOAD"
-        say "     (new terminals get it automatically)"
-    fi
+    print_path_step
     say "  1. Log in once — device code, approve at chatgpt.com from any device:"
     say "       cd ~/some-project && codex-sandbox login --device-auth"
     say ""

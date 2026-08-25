@@ -17,6 +17,7 @@ param(
     [switch]$Yes,
     [switch]$NoBuild,
     [switch]$NoPathEdit,
+    [switch]$PrintPath,
     [switch]$Quiet,
     [switch]$Version,
     [switch]$Help,
@@ -322,6 +323,17 @@ function Set-UserPath {
 
 function Add-ToUserPath {
     param([string]$Dir)
+
+    # Whether the launcher is runnable by name in THIS session is a separate
+    # question from whether the persisted user PATH already lists it — and it is
+    # the one that decides if the caller needs telling. Installing the second
+    # agent finds the persisted PATH already correct, writes nothing, and used
+    # to say nothing, leaving the launcher un-runnable with no explanation.
+    if ((($env:Path -split ';') -notcontains $Dir)) {
+        $script:PathNeedsReload = $true
+        $script:PathExportLine  = '$env:Path = "$env:Path;' + $Dir + '"'
+    }
+
     $current = Get-UserPath
     if ($null -eq $current) { $current = '' }
     $entries = $current -split ';' | Where-Object { $_ -ne '' }
@@ -409,7 +421,10 @@ function Invoke-Build {
         '--label', "sandbox.installer_version=$script:InstallerVersion"
     ) + $ExtraArgs + @('-t', $script:Image, $script:SrcDirPath)
 
-    & docker @buildArgs
+    # The build stream is progress, not data: routed to stderr like every other
+    # diagnostic here, so the success stream stays free for -PrintPath. Write-Host
+    # would not do — with stdout redirected the host writes it there anyway.
+    & docker @buildArgs | ForEach-Object { [Console]::Error.WriteLine($_) }
     if ($LASTEXITCODE -ne 0) {
         Oops "docker build failed (exit $LASTEXITCODE)"
         Remedy @(
@@ -469,6 +484,31 @@ function Show-AgentCheckExtra { }
 function Remove-AgentExtra { }
 function Get-AgentBuildArgs { return @() }
 
+# Step 0 of every agent's next-steps block: printed whenever the launcher is
+# not runnable by name in the session that ran the installer.
+function Write-PathStep {
+    if (-not $script:PathNeedsReload) { return }
+    Say "  0. Make $script:LauncherName runnable in this terminal:"
+    Say "       $script:PathExportLine"
+    if ($script:PathWasEdited) { Say '     New terminals pick it up automatically.' }
+    Say ''
+}
+
+# The success stream's only job. Every diagnostic here goes to Write-Host or
+# the error stream, so -PrintPath can hand the caller a line to apply to its
+# own session:
+#
+#   & ([scriptblock]::Create((irm .../claude.ps1))) -PrintPath | iex
+#
+# Unlike the shell installers this needs an explicit switch: PowerShell's
+# success stream reaches `| iex` without the process's stdout ever being
+# redirected, so there is no "am I being captured" test to key off.
+function Write-PathCommand {
+    if (-not $script:PrintPath) { return }
+    if (-not $script:PathExportLine) { return }
+    Write-Output $script:PathExportLine
+}
+
 # ---- usage ----------------------------------------------------------------
 
 function Show-Usage {
@@ -493,6 +533,8 @@ Options
   -SrcDir DIR    Directory for the Dockerfile (default: <home>\$script:Agent-sandbox)
   -NoBuild       Install the files but skip the docker build
   -NoPathEdit    Never touch your user PATH
+  -PrintPath     Print this session's PATH command to the success stream, so
+                 piping the installer into iex makes the launcher runnable now
   -Yes           Assume yes for confirmations
   -Quiet         Only warnings and errors
   -Version       Print the installer version
@@ -535,9 +577,12 @@ function Invoke-Install {
     if ($wasInstalled) {
         Say "  $script:AgentName sandbox is at v$script:InstallerVersion."
         Say "  $script:LauncherName --sandbox-doctor    to confirm image, volumes and versions"
+        Say ''
+        Write-PathStep
     } else {
         Show-NextSteps
     }
+    Write-PathCommand
 }
 
 function Invoke-Check {
@@ -1087,9 +1132,7 @@ exit /b %ERRORLEVEL%
 function Show-NextSteps {
     Say ''
     Say 'Next steps'
-    if ($script:PathWasEdited) {
-        Say '  0. Open a new terminal so the PATH change takes effect.'
-    }
+    Write-PathStep
     Say "  1. Log in once — the token persists in claude-config-$(Get-SandboxUser):"
     Say '       cd C:\code\some-project'
     Say '       claude-sandbox'
@@ -1115,6 +1158,9 @@ function Invoke-Main {
     $script:NoPathEdit = [bool]$NoPathEdit
     $script:Quiet      = [bool]$Quiet
     $script:PathWasEdited = $false
+    $script:PrintPath = [bool]$PrintPath
+    $script:PathNeedsReload = $false
+    $script:PathExportLine = ''
     $script:ForceBuild = $false
     $script:ForceBuildReason = ''
 
