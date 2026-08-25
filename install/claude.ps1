@@ -673,7 +673,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Rust toolchain (read-only at runtime; update = rebuild image)
 ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo
-RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --no-modify-path --profile minimal \
+# Downloaded to a file rather than piped into sh: a failed `curl | sh` exits 0
+# because sh simply reads empty input, so a transient network blip silently
+# installs nothing and only surfaces two commands later as a confusing
+# "chmod: cannot access /usr/local/rustup". With && the download failure is fatal.
+RUN curl -fsSL --retry 3 --retry-connrefused https://sh.rustup.rs -o /tmp/rustup-init.sh \
+    && sh /tmp/rustup-init.sh -y --no-modify-path --profile minimal \
+    && rm -f /tmp/rustup-init.sh \
     && chmod -R a+rX ${RUSTUP_HOME} ${CARGO_HOME}
 
 # Non-root user (required: claude rejects --dangerously-skip-permissions as

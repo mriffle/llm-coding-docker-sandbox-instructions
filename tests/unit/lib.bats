@@ -132,7 +132,7 @@ teardown() { common_teardown; }
 }
 
 @test "ensure_on_path appends exactly one guarded block, and only once" {
-    PATH="/usr/bin:/bin"
+    PATH=$(path_excluding "$HOME/.local/bin")
     ensure_on_path "$HOME/.local/bin"
     assert_file_contains "$HOME/.bashrc" 'export PATH="$HOME/.local/bin:$PATH"'
     ensure_on_path "$HOME/.local/bin"
@@ -140,20 +140,20 @@ teardown() { common_teardown; }
 }
 
 @test "ensure_on_path picks the rc file from \$SHELL" {
-    PATH="/usr/bin:/bin"
+    PATH=$(path_excluding "$HOME/.local/bin")
     SHELL=/usr/bin/zsh ensure_on_path "$HOME/.local/bin"
     assert_file_exists "$HOME/.zshrc"
     assert_file_missing "$HOME/.bashrc"
 }
 
 @test "ensure_on_path does nothing when the directory is already on PATH" {
-    PATH="$HOME/.local/bin:/usr/bin"
+    PATH="$HOME/.local/bin:$PATH"
     ensure_on_path "$HOME/.local/bin"
     assert_file_missing "$HOME/.bashrc"
 }
 
 @test "ensure_on_path honours --no-path-edit" {
-    PATH="/usr/bin:/bin"
+    PATH=$(path_excluding "$HOME/.local/bin")
     NO_PATH_EDIT=1 ensure_on_path "$HOME/.local/bin"
     assert_file_missing "$HOME/.bashrc"
 }

@@ -54,6 +54,14 @@ run_install() {
 
 docker_log() { cat "$FAKE_DOCKER_LOG"; }
 
+# The current PATH with one directory removed. Replacing PATH wholesale with a
+# guessed list (say /usr/bin:/bin) is how a test ends up without `rm` on a
+# system that puts it somewhere else — macOS keeps /bin/rm, not /usr/bin/rm —
+# and bats' own cleanup then fails even though every test passed.
+path_excluding() {
+    printf '%s' "$PATH" | tr ':' '\n' | grep -vxF "$1" | paste -sd: -
+}
+
 # A PATH holding everything the installers need EXCEPT one named tool.
 #
 # Simulating "docker is not installed" by trimming PATH to /usr/bin:/bin only
