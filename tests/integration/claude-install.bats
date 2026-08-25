@@ -182,7 +182,8 @@ make_v2_installer() {
 # --- preflight failures ----------------------------------------------------
 
 @test "docker missing on Debian gives apt instructions and exit 10" {
-    SANDBOX_OS_RELEASE="$REPO_ROOT/tests/fixtures/osrelease/ubuntu" \
+    SANDBOX_FAKE_UNAME_S=Linux \
+      SANDBOX_OS_RELEASE="$REPO_ROOT/tests/fixtures/osrelease/ubuntu" \
       PATH="$(path_without docker)" run bash "$(installer claude)"
     assert_status 10
     assert_output_contains 'Docker is not installed'
@@ -192,21 +193,24 @@ make_v2_installer() {
 }
 
 @test "docker missing on Fedora gives dnf instructions" {
-    SANDBOX_OS_RELEASE="$REPO_ROOT/tests/fixtures/osrelease/fedora" \
+    SANDBOX_FAKE_UNAME_S=Linux \
+      SANDBOX_OS_RELEASE="$REPO_ROOT/tests/fixtures/osrelease/fedora" \
       PATH="$(path_without docker)" run bash "$(installer claude)"
     assert_status 10
     assert_output_contains 'dnf install -y docker'
 }
 
 @test "docker missing on Arch gives pacman instructions" {
-    SANDBOX_OS_RELEASE="$REPO_ROOT/tests/fixtures/osrelease/arch" \
+    SANDBOX_FAKE_UNAME_S=Linux \
+      SANDBOX_OS_RELEASE="$REPO_ROOT/tests/fixtures/osrelease/arch" \
       PATH="$(path_without docker)" run bash "$(installer claude)"
     assert_status 10
     assert_output_contains 'pacman -S --needed docker'
 }
 
 @test "docker missing on an unknown distro falls back to the generic guide" {
-    SANDBOX_OS_RELEASE="$REPO_ROOT/tests/fixtures/osrelease/weirdos" \
+    SANDBOX_FAKE_UNAME_S=Linux \
+      SANDBOX_OS_RELEASE="$REPO_ROOT/tests/fixtures/osrelease/weirdos" \
       PATH="$(path_without docker)" run bash "$(installer claude)"
     assert_status 10
     assert_output_contains 'docs.docker.com/engine/install'
@@ -228,7 +232,9 @@ make_v2_installer() {
 }
 
 @test "a stopped daemon is distinguished from a missing docker" {
-    FAKE_DOCKER_INFO_RC=1 run_install claude
+    # systemctl advice is Linux-only; on Darwin the installer says "start
+    # Docker Desktop" instead, which the macOS-specific test below covers.
+    SANDBOX_FAKE_UNAME_S=Linux FAKE_DOCKER_INFO_RC=1 run_install claude
     assert_status 11
     assert_output_contains 'daemon is not running'
     assert_output_contains 'systemctl start docker'

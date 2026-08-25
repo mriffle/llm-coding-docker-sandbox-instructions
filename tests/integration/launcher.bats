@@ -48,7 +48,10 @@ refute_tmux_log() {
 
 @test "launcher mounts the current directory and nothing else" {
     cd "$PROJECT"
-    local here; here=$(pwd -P)
+    # The shell launcher mounts "$PWD", which bash keeps *logical* — on macOS
+    # that is the /var form, not the /private/var one `pwd -P` would give.
+    # (The PowerShell launcher is the opposite; see powershell.bats.)
+    local here=$PWD
     run bash "$LAUNCH"
     assert_success
     argv_has "$here:/workspace"

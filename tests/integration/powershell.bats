@@ -261,8 +261,9 @@ ps_install() {
     ps_install claude
     mkdir -p "$TESTDIR/proj"
     cd "$TESTDIR/proj"
-    # On macOS $TESTDIR is under /var, a symlink to /private/var, and
-    # PowerShell reports the resolved path — so resolve ours too.
+    # PowerShell reports the *physical* working directory, so on macOS this is
+    # the /private/var form. (The shell launcher is the opposite: it mounts
+    # bash's logical $PWD; see launcher.bats.)
     local here; here=$(pwd -P)
     : > "$FAKE_DOCKER_ARGV"
     run "$PWSH" -NoProfile -File "$LAUNCHER" --dangerously-skip-permissions
