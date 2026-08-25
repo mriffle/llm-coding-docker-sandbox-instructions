@@ -7,7 +7,7 @@ load '../helper'
 setup() { common_setup; }
 teardown() { common_teardown; }
 
-RAW_BASE="https://raw.githubusercontent.com/mriffle/llm-coding-docker-sandbox-instructions/main"
+RAW_BASE="https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main"
 
 @test "the version in VERSION is stamped into all four installers" {
     local v

@@ -7,15 +7,15 @@
 #
 # Claude Code sandbox installer.
 #
-#   curl -fsSL https://raw.githubusercontent.com/mriffle/llm-coding-docker-sandbox-instructions/main/install/claude.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main/install/claude.sh | bash
 #
 # Creates ~/claude-sandbox/Dockerfile, ~/.local/bin/claude-sandbox, a per-user
 # image, and the named volumes that hold your login. Re-run it to upgrade.
 set -euo pipefail
 
 INSTALLER_VERSION="1.0.0"
-RAW_BASE="https://raw.githubusercontent.com/mriffle/llm-coding-docker-sandbox-instructions/main"
-REPO_URL="https://github.com/mriffle/llm-coding-docker-sandbox-instructions"
+RAW_BASE="https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main"
+REPO_URL="https://github.com/mriffle/llm-cli-docker-sandbox"
 
 AGENT=claude
 AGENT_NAME="Claude Code"
@@ -1152,7 +1152,7 @@ cat <<'__SANDBOX_ASSET_EOF__'
 # claude-sandbox — run Claude Code sandboxed in the current directory.
 #
 # Installed by the agent-sandbox installer (v1.0.0):
-#   curl -fsSL https://raw.githubusercontent.com/mriffle/llm-coding-docker-sandbox-instructions/main/install/claude.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main/install/claude.sh | bash
 # Edits here are backed up, not preserved, when you upgrade.
 #
 # The only host path the container can see is $PWD. Auth and the
@@ -1166,10 +1166,10 @@ AGENT_NAME="Claude Code"
 IMAGE_BASENAME=claude-sandbox
 LAUNCHER_NAME=claude-sandbox
 
-# --- shared launcher machinery (generated; see https://github.com/mriffle/llm-coding-docker-sandbox-instructions) ----------------
+# --- shared launcher machinery (generated; see https://github.com/mriffle/llm-cli-docker-sandbox) ----------------
 SANDBOX_VERSION="1.0.0"
-RAW_BASE="https://raw.githubusercontent.com/mriffle/llm-coding-docker-sandbox-instructions/main"
-REPO_URL="https://github.com/mriffle/llm-coding-docker-sandbox-instructions"
+RAW_BASE="https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main"
+REPO_URL="https://github.com/mriffle/llm-cli-docker-sandbox"
 
 have() { command -v "$1" >/dev/null 2>&1; }
 ldie() { printf 'sandbox: %s\n' "$*" >&2; exit 1; }

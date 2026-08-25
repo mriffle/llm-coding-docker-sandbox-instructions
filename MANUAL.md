@@ -5,8 +5,8 @@
 > documented at the bottom of this page:
 >
 > ```bash
-> curl -fsSL https://raw.githubusercontent.com/mriffle/llm-coding-docker-sandbox-instructions/main/install/claude.sh | bash
-> curl -fsSL https://raw.githubusercontent.com/mriffle/llm-coding-docker-sandbox-instructions/main/install/codex.sh  | bash
+> curl -fsSL https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main/install/claude.sh | bash
+> curl -fsSL https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main/install/codex.sh  | bash
 > ```
 >
 > This page is the reference: exactly what those scripts create and why, for

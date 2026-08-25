@@ -5,7 +5,7 @@
 #  Version 1.0.0
 #
 #
-#   irm https://raw.githubusercontent.com/mriffle/llm-coding-docker-sandbox-instructions/main/install/claude.ps1 | iex
+#   irm https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main/install/claude.ps1 | iex
 #
 # Creates <home>\claude-sandbox\Dockerfile, launcher scripts in <home>\bin,
 # a per-user image, and the named volumes that hold your login. Re-run to upgrade.
@@ -27,8 +27,8 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $script:InstallerVersion = '1.0.0'
-$script:RawBase          = 'https://raw.githubusercontent.com/mriffle/llm-coding-docker-sandbox-instructions/main'
-$script:RepoUrl          = 'https://github.com/mriffle/llm-coding-docker-sandbox-instructions'
+$script:RawBase          = 'https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main'
+$script:RepoUrl          = 'https://github.com/mriffle/llm-cli-docker-sandbox'
 $script:Agent            = 'claude'
 $script:AgentName        = 'Claude Code'
 $script:LauncherName     = 'claude-sandbox'
@@ -774,19 +774,19 @@ $AssetLauncher = @'
 # claude-sandbox.ps1 — run Claude Code sandboxed in the current directory.
 #
 # Installed by the agent-sandbox installer (v1.0.0):
-#   irm https://raw.githubusercontent.com/mriffle/llm-coding-docker-sandbox-instructions/main/install/claude.ps1 | iex
+#   irm https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main/install/claude.ps1 | iex
 # Edits here are backed up, not preserved, when you upgrade.
 $ErrorActionPreference = 'Stop'
 
 $SandboxVersion = '1.0.0'
-$RawBase        = 'https://raw.githubusercontent.com/mriffle/llm-coding-docker-sandbox-instructions/main'
-$RepoUrl        = 'https://github.com/mriffle/llm-coding-docker-sandbox-instructions'
+$RawBase        = 'https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main'
+$RepoUrl        = 'https://github.com/mriffle/llm-cli-docker-sandbox'
 $Agent          = 'claude'
 $AgentBin       = 'claude'
 $AgentName      = 'Claude Code'
 $LauncherName   = 'claude-sandbox'
 
-# --- shared launcher machinery (generated; see https://github.com/mriffle/llm-coding-docker-sandbox-instructions) ----------------
+# --- shared launcher machinery (generated; see https://github.com/mriffle/llm-cli-docker-sandbox) ----------------
 
 function Get-User {
     if ($env:SANDBOX_FAKE_USER) { return $env:SANDBOX_FAKE_USER }

@@ -5,7 +5,7 @@
 #  Version 1.0.0
 #
 #
-#   irm https://raw.githubusercontent.com/mriffle/llm-coding-docker-sandbox-instructions/main/install/codex.ps1 | iex
+#   irm https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main/install/codex.ps1 | iex
 #
 # Creates <home>\codex-sandbox\{Dockerfile,config.toml}, launcher scripts in
 # <home>\bin, a per-user image, and the volume that holds your login.
@@ -27,8 +27,8 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $script:InstallerVersion = '1.0.0'
-$script:RawBase          = 'https://raw.githubusercontent.com/mriffle/llm-coding-docker-sandbox-instructions/main'
-$script:RepoUrl          = 'https://github.com/mriffle/llm-coding-docker-sandbox-instructions'
+$script:RawBase          = 'https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main'
+$script:RepoUrl          = 'https://github.com/mriffle/llm-cli-docker-sandbox'
 $script:Agent            = 'codex'
 $script:AgentName        = 'Codex CLI'
 $script:LauncherName     = 'codex-sandbox'
@@ -757,21 +757,21 @@ $AssetLauncher = @'
 # codex-sandbox.ps1 — run Codex CLI sandboxed in the current directory.
 #
 # Installed by the agent-sandbox installer (v1.0.0):
-#   irm https://raw.githubusercontent.com/mriffle/llm-coding-docker-sandbox-instructions/main/install/codex.ps1 | iex
+#   irm https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main/install/codex.ps1 | iex
 # Edits here are backed up, not preserved, when you upgrade.
 #
 # Autonomy comes from ~/.codex/config.toml inside the container, not a flag.
 $ErrorActionPreference = 'Stop'
 
 $SandboxVersion = '1.0.0'
-$RawBase        = 'https://raw.githubusercontent.com/mriffle/llm-coding-docker-sandbox-instructions/main'
-$RepoUrl        = 'https://github.com/mriffle/llm-coding-docker-sandbox-instructions'
+$RawBase        = 'https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main'
+$RepoUrl        = 'https://github.com/mriffle/llm-cli-docker-sandbox'
 $Agent          = 'codex'
 $AgentBin       = 'codex'
 $AgentName      = 'Codex CLI'
 $LauncherName   = 'codex-sandbox'
 
-# --- shared launcher machinery (generated; see https://github.com/mriffle/llm-coding-docker-sandbox-instructions) ----------------
+# --- shared launcher machinery (generated; see https://github.com/mriffle/llm-cli-docker-sandbox) ----------------
 
 function Get-User {
     if ($env:SANDBOX_FAKE_USER) { return $env:SANDBOX_FAKE_USER }

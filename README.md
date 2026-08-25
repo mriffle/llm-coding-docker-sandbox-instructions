@@ -16,15 +16,15 @@ Design principles:
 **Linux, macOS, or inside WSL2:**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/mriffle/llm-coding-docker-sandbox-instructions/main/install/claude.sh | bash
-curl -fsSL https://raw.githubusercontent.com/mriffle/llm-coding-docker-sandbox-instructions/main/install/codex.sh  | bash
+curl -fsSL https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main/install/claude.sh | bash
+curl -fsSL https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main/install/codex.sh  | bash
 ```
 
 **Windows (native, no WSL) — in PowerShell:**
 
 ```powershell
-irm https://raw.githubusercontent.com/mriffle/llm-coding-docker-sandbox-instructions/main/install/claude.ps1 | iex
-irm https://raw.githubusercontent.com/mriffle/llm-coding-docker-sandbox-instructions/main/install/codex.ps1  | iex
+irm https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main/install/claude.ps1 | iex
+irm https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main/install/codex.ps1  | iex
 ```
 
 The installer puts the launcher in `~/.local/bin`, and no script can change
@@ -32,7 +32,7 @@ the `PATH` of the shell that ran it. If that directory wasn't already on your
 `PATH`, wrap the command in `eval` and it will be:
 
 ```bash
-eval "$(curl -fsSL https://raw.githubusercontent.com/mriffle/llm-coding-docker-sandbox-instructions/main/install/claude.sh | bash)"
+eval "$(curl -fsSL https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main/install/claude.sh | bash)"
 ```
 
 Everything the installer prints goes to stderr, so the only thing `eval` ever
@@ -137,6 +137,8 @@ claude-sandbox --sandbox-upgrade        # shortcut for re-running the installer
 claude-sandbox --sandbox-doctor         # what's installed, and is it current?
 ```
 
+**If you installed before this repo was renamed** (it was `llm-coding-docker-sandbox-instructions`), nothing breaks: your launcher has the old URL compiled into it, and GitHub keeps serving that path, so the update check and `--sandbox-upgrade` both keep working. Re-running the install command above replaces the baked-in URL with the current one.
+
 Once a day, at most, a launcher checks whether a newer sandbox has been published and prints a one-line note if so. It has a two-second ceiling, is silent when offline, and never blocks a launch. Turn it off with `SANDBOX_NO_UPDATE_CHECK=1`.
 
 Claude Code itself doesn't need any of this — it self-updates inside the container, into a volume that survives rebuilds. Codex has no updater, so its launcher checks the npm registry and rebuilds when a new release ships (a no-op when you're current).
@@ -154,7 +156,7 @@ curl -fsSL .../install/claude.sh | bash -s -- --uninstall --purge   # also delet
 `--uninstall` deliberately leaves the named volumes alone, so uninstalling doesn't log you out. `--purge` deletes them and asks first. Other flags: `--force`, `--prefix DIR`, `--src-dir DIR`, `--no-build`, `--no-path-edit`, `--yes`, `--quiet`, `--help`. In PowerShell they're `-Check`, `-Uninstall`, `-Purge`, `-Force`, `-Prefix`, `-PrintPath`, and so on; because a piped script can't take arguments, use:
 
 ```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/mriffle/llm-coding-docker-sandbox-instructions/main/install/claude.ps1))) -Check
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main/install/claude.ps1))) -Check
 ```
 
 ## What gets installed

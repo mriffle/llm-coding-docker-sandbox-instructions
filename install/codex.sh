@@ -7,15 +7,15 @@
 #
 # Codex CLI sandbox installer.
 #
-#   curl -fsSL https://raw.githubusercontent.com/mriffle/llm-coding-docker-sandbox-instructions/main/install/codex.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main/install/codex.sh | bash
 #
 # Creates ~/codex-sandbox/{Dockerfile,config.toml}, ~/.local/bin/codex-sandbox,
 # a per-user image, and the named volume that holds your login. Re-run to upgrade.
 set -euo pipefail
 
 INSTALLER_VERSION="1.0.0"
-RAW_BASE="https://raw.githubusercontent.com/mriffle/llm-coding-docker-sandbox-instructions/main"
-REPO_URL="https://github.com/mriffle/llm-coding-docker-sandbox-instructions"
+RAW_BASE="https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main"
+REPO_URL="https://github.com/mriffle/llm-cli-docker-sandbox"
 
 AGENT=codex
 AGENT_NAME="Codex CLI"
@@ -1135,7 +1135,7 @@ cat <<'__SANDBOX_ASSET_EOF__'
 # codex-sandbox — run Codex CLI sandboxed in the current directory.
 #
 # Installed by the agent-sandbox installer (v1.0.0):
-#   curl -fsSL https://raw.githubusercontent.com/mriffle/llm-coding-docker-sandbox-instructions/main/install/codex.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main/install/codex.sh | bash
 # Edits here are backed up, not preserved, when you upgrade.
 #
 # Autonomy comes from ~/.codex/config.toml inside the container
@@ -1149,10 +1149,10 @@ AGENT_NAME="Codex CLI"
 IMAGE_BASENAME=codex-sandbox
 LAUNCHER_NAME=codex-sandbox
 
-# --- shared launcher machinery (generated; see https://github.com/mriffle/llm-coding-docker-sandbox-instructions) ----------------
+# --- shared launcher machinery (generated; see https://github.com/mriffle/llm-cli-docker-sandbox) ----------------
 SANDBOX_VERSION="1.0.0"
-RAW_BASE="https://raw.githubusercontent.com/mriffle/llm-coding-docker-sandbox-instructions/main"
-REPO_URL="https://github.com/mriffle/llm-coding-docker-sandbox-instructions"
+RAW_BASE="https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main"
+REPO_URL="https://github.com/mriffle/llm-cli-docker-sandbox"
 
 have() { command -v "$1" >/dev/null 2>&1; }
 ldie() { printf 'sandbox: %s\n' "$*" >&2; exit 1; }

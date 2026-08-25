@@ -19,8 +19,8 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 SRC="$ROOT/src"
 OUT="$ROOT/install"
 VERSION=$(tr -d ' \r\n' < "$ROOT/VERSION")
-REPO_URL=${REPO_URL:-https://github.com/mriffle/llm-coding-docker-sandbox-instructions}
-RAW_BASE=${RAW_BASE:-https://raw.githubusercontent.com/mriffle/llm-coding-docker-sandbox-instructions/main}
+REPO_URL=${REPO_URL:-https://github.com/mriffle/llm-cli-docker-sandbox}
+RAW_BASE=${RAW_BASE:-https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main}
 
 BASH_EOF_TAG='__SANDBOX_ASSET_EOF__'
 LANG_KIND="sh"

@@ -57,8 +57,8 @@ You can still open these files from Windows apps: VS Code's WSL integration does
 From your Ubuntu terminal — you're on Linux now, so these are the ordinary shell installers:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/mriffle/llm-coding-docker-sandbox-instructions/main/install/claude.sh | bash
-curl -fsSL https://raw.githubusercontent.com/mriffle/llm-coding-docker-sandbox-instructions/main/install/codex.sh  | bash
+curl -fsSL https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main/install/claude.sh | bash
+curl -fsSL https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main/install/codex.sh  | bash
 ```
 
 Then follow [the main README](README.md) for first-run login and daily use. tmux works (`claude-sandbox --sandbox-tmux`), device-code auth works (open the URL in your Windows browser — same machine, no "another device" needed), and per-user namespacing behaves as on any Linux host. One nuance: WSL is typically single-user, so the `$USER` suffixes are less load-bearing than on a shared server — harmless, and kept for consistency.
@@ -89,8 +89,8 @@ docker run --rm hello-world
 ### 2. Install the sandboxes
 
 ```powershell
-irm https://raw.githubusercontent.com/mriffle/llm-coding-docker-sandbox-instructions/main/install/claude.ps1 | iex
-irm https://raw.githubusercontent.com/mriffle/llm-coding-docker-sandbox-instructions/main/install/codex.ps1  | iex
+irm https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main/install/claude.ps1 | iex
+irm https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main/install/codex.ps1  | iex
 ```
 
 Each installer writes `%USERPROFILE%\<agent>-sandbox\Dockerfile`, a launcher pair (`claude-sandbox.ps1` and a `claude-sandbox.cmd` shim) into `%USERPROFILE%\bin`, adds that directory to your user PATH, builds the image and creates the volumes. Open a new terminal afterwards so the PATH change takes effect.
@@ -100,7 +100,7 @@ The `.cmd` shim means `claude-sandbox` works from both PowerShell and `cmd.exe`,
 To pass options, note that a piped script can't take arguments; create a script block instead:
 
 ```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/mriffle/llm-coding-docker-sandbox-instructions/main/install/claude.ps1))) -Check
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main/install/claude.ps1))) -Check
 ```
 
 ### 3. Authenticate and use
