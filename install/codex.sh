@@ -1155,11 +1155,123 @@ short_hash() {
     fi
 }
 
+# --- git -------------------------------------------------------------------
+# Identity always, a credential only on request. Both travel as environment;
+# no new host path is ever mounted.
+#
+# GIT_CONFIG_COUNT/KEY/VALUE is real git config, so `git config --get
+# user.email` reads back correctly inside the container. GIT_AUTHOR_* would set
+# the commit but leave the config empty, and hooks read the config.
+#
+# Every probe here is best-effort. No git on the host, no identity configured,
+# a directory that is not a repository — each must leave the launch untouched.
+GIT_ENV_ARGS=()
+GIT_ENV_COUNT=0
+
+# Single quotes are deliberate: these variables expand in the container's shell,
+# from the environment passed alongside — not here, and not at build time.
+# shellcheck disable=SC2016  # the $VARs belong to the container, not this shell
+GIT_CRED_HELPER='!f(){ test "$1" = get && printf "username=%s\npassword=%s\n" "$SANDBOX_GIT_USER" "$SANDBOX_GIT_TOKEN"; }; f'
+
+git_env_add() {
+    GIT_ENV_ARGS+=(-e "GIT_CONFIG_KEY_$GIT_ENV_COUNT=$1" \
+                   -e "GIT_CONFIG_VALUE_$GIT_ENV_COUNT=$2")
+    GIT_ENV_COUNT=$((GIT_ENV_COUNT + 1))
+}
+
+# `git config --get` exits 1 for an unset key. That is the normal case, not a
+# failure worth reporting.
+git_config_get() { git config --get "$1" 2>/dev/null || printf ''; }
+
+# The origin's host, and only for https — an ssh or scp-style remote never
+# consults a credential helper, so there is nothing useful to forward.
+git_origin_host() {
+    local url
+    url=$(git config --get remote.origin.url 2>/dev/null) || return 1
+    case "$url" in
+        https://*|http://*) ;;
+        *) return 1 ;;
+    esac
+    url=${url#*://}
+    url=${url%%/*}
+    printf '%s' "${url#*@}"
+}
+
+GIT_CRED_USER=''
+GIT_CRED_TOKEN=''
+git_resolve_cred() {
+    local host=$1 line out
+    GIT_CRED_USER=''; GIT_CRED_TOKEN=''
+
+    if [ "$host" = github.com ] && [ -n "${GH_TOKEN:-${GITHUB_TOKEN:-}}" ]; then
+        GIT_CRED_USER=x-access-token
+        GIT_CRED_TOKEN=${GH_TOKEN:-${GITHUB_TOKEN:-}}
+        return 0
+    fi
+
+    if have gh; then
+        out=$(gh auth token --hostname "$host" 2>/dev/null | head -1 | tr -d ' \r\n')
+        if [ -n "$out" ]; then
+            GIT_CRED_USER=x-access-token
+            GIT_CRED_TOKEN=$out
+            return 0
+        fi
+    fi
+
+    # The host's own credential store answers here — keychain, GCM, libsecret or
+    # a plain file — so the container never learns which backend is in use.
+    # GIT_TERMINAL_PROMPT=0 is load-bearing: without it git prompts on /dev/tty
+    # and the launch hangs instead of quietly declining.
+    out=$(printf 'protocol=https\nhost=%s\n\n' "$host" \
+        | GIT_TERMINAL_PROMPT=0 git credential fill 2>/dev/null)
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+            username=*) GIT_CRED_USER=${line#*=} ;;
+            password=*) GIT_CRED_TOKEN=${line#*=} ;;
+        esac
+    done <<EOF
+$out
+EOF
+    [ -n "$GIT_CRED_TOKEN" ]
+}
+
+git_env_args() {
+    local name email host
+    GIT_ENV_ARGS=()
+    GIT_ENV_COUNT=0
+    [ -z "${SANDBOX_NO_GIT:-}" ] || return 0
+    have git || return 0
+
+    name=$(git_config_get user.name)
+    email=$(git_config_get user.email)
+    [ -z "$name" ]  || git_env_add user.name "$name"
+    [ -z "$email" ] || git_env_add user.email "$email"
+
+    if [ -n "${SANDBOX_GIT:-}" ]; then
+        host=$(git_origin_host) || host=''
+        if [ -z "$host" ]; then
+            lwarn "--sandbox-git: no https remote here; nothing to forward"
+        elif git_resolve_cred "$host"; then
+            GIT_ENV_ARGS+=(-e "SANDBOX_GIT_USER=$GIT_CRED_USER" \
+                           -e "SANDBOX_GIT_TOKEN=$GIT_CRED_TOKEN")
+            git_env_add "credential.https://$host.helper" "$GIT_CRED_HELPER"
+        else
+            lwarn "--sandbox-git: no credential stored for $host; pushing will fail"
+        fi
+    fi
+
+    [ "$GIT_ENV_COUNT" -eq 0 ] || GIT_ENV_ARGS+=(-e "GIT_CONFIG_COUNT=$GIT_ENV_COUNT")
+}
+
 run_container() {
+    git_env_args
+    # The ${a[@]+"${a[@]}"} form, not a bare "${a[@]}": expanding an *empty*
+    # array under `set -u` is fatal on bash 3.2, which is still macOS /bin/bash.
     exec docker run -it --rm \
         --name "$(container_name)" \
         -v "$PWD:/workspace" \
         "${MOUNT_ARGS[@]}" \
+        ${GIT_ENV_ARGS[@]+"${GIT_ENV_ARGS[@]}"} \
         --cap-drop=ALL \
         --security-opt=no-new-privileges \
         "$IMAGE" "$AGENT_BIN" "$@"
@@ -1214,7 +1326,9 @@ tmux_launch() {
     self=$(launcher_self)
     # %q keeps arguments with spaces intact through tmux's shell.
     cmd=$(printf '%q ' "$self" "$@")
-    cmd="SANDBOX_IN_TMUX=1 $cmd; ec=\$?; if [ \$ec -ne 0 ]; then printf 'exited with status %s — press Enter to close\\n' \"\$ec\"; read -r _; fi"
+    # --sandbox-git was consumed before the dispatch, so it is no longer in "$@";
+    # carry the decision into the session as environment instead.
+    cmd="SANDBOX_IN_TMUX=1 ${SANDBOX_GIT:+SANDBOX_GIT=1 }$cmd; ec=\$?; if [ \$ec -ne 0 ]; then printf 'exited with status %s — press Enter to close\\n' \"\$ec\"; read -r _; fi"
 
     tmux new-session -d -s "$session" -c "$PWD" "$cmd" \
         || ldie "could not create the tmux session $session"
@@ -1229,7 +1343,7 @@ tmux_launch() {
 
 # --- doctor ----------------------------------------------------------------
 doctor() {
-    local manifest vol owner latest label_uid
+    local manifest vol owner latest label_uid name email host
     printf '%s sandbox — doctor\n' "$AGENT_NAME"
     printf '  launcher version    %s (%s)\n' "$SANDBOX_VERSION" "$(launcher_self)"
     printf '  user / uid          %s / %s\n' "$(sandbox_user)" "$(id -u)"
@@ -1273,6 +1387,27 @@ doctor() {
         printf '  manifest            missing (installed by hand?)\n'
     fi
 
+    # Availability only — the credential itself is never printed.
+    if ! have git; then
+        printf '  git                 NOT INSTALLED on this host\n'
+    else
+        name=$(git_config_get user.name)
+        email=$(git_config_get user.email)
+        if [ -n "$name" ] || [ -n "$email" ]; then
+            printf '  git identity        %s <%s>\n' "${name:-?}" "${email:-?}"
+        else
+            printf '  git identity        NONE configured — commits will fail\n'
+        fi
+        host=$(git_origin_host) || host=''
+        if [ -z "$host" ]; then
+            printf '  git credential      no https remote here\n'
+        elif git_resolve_cred "$host"; then
+            printf '  git credential      available for %s — forward with --sandbox-git\n' "$host"
+        else
+            printf '  git credential      none stored for %s\n' "$host"
+        fi
+    fi
+
     if have curl; then
         latest=$(curl -fsSL --max-time 3 "$RAW_BASE/VERSION" 2>/dev/null | head -1 | tr -d ' \r\n')
         if [ -n "$latest" ] && version_gt "$latest" "$SANDBOX_VERSION"; then
@@ -1298,6 +1433,7 @@ $LAUNCHER_NAME — run $AGENT_NAME sandboxed in the current directory (v$SANDBOX
 Everything is passed through to $AGENT_BIN untouched, except these flags,
 which are only recognised in first position:
 
+  --sandbox-git [args...]            also forward a git credential (see below)
   --sandbox-tmux [args...]           run inside a tmux session for this project
   --sandbox-tmux-detached [args...]  same, but do not attach
   --sandbox-doctor                   report on image, volumes, UIDs and versions
@@ -1305,13 +1441,25 @@ which are only recognised in first position:
   --sandbox-version                  print the sandbox version
   --sandbox-help                     this message
 
+Your git name and email are always passed through, so the agent can commit.
+--sandbox-git additionally forwards a credential for the origin remote's host,
+so it can push. That credential is scoped to that one host, but within it the
+token's own permissions apply — prefer a fine-grained one.
+
 Environment:
   SANDBOX_NO_UPDATE_CHECK=1   never check upstream for a newer sandbox
+  SANDBOX_NO_GIT=1            pass no git identity or credential at all
+  SANDBOX_GIT=1               same as --sandbox-git
 USAGE
 }
 
 launcher_main() {
     IMAGE="$IMAGE_BASENAME-$(sandbox_user)"
+    # Consumed before the dispatch below, so it composes: --sandbox-git
+    # --sandbox-tmux works, and the flag still only counts in first position.
+    case "${1:-}" in
+        --sandbox-git) SANDBOX_GIT=1; shift ;;
+    esac
     case "${1:-}" in
         --sandbox-help)           launcher_usage; exit 0 ;;
         --sandbox-version)        printf '%s\n' "$SANDBOX_VERSION"; exit 0 ;;

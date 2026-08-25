@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+#
+# A scriptable stand-in for git, so the launcher's identity and credential
+# probes can be exercised without touching the developer's real git config —
+# and, more importantly, without any chance of a real token from
+# ~/.git-credentials reaching an argv log or a CI failure dump.
+#
+# Driven by:
+#   FAKE_GIT_NAME       value for `git config --get user.name`   (unset = none)
+#   FAKE_GIT_EMAIL      value for `git config --get user.email`  (unset = none)
+#   FAKE_GIT_ORIGIN     value for `git config --get remote.origin.url`
+#   FAKE_GIT_CRED_USER  username `git credential fill` reports
+#   FAKE_GIT_CRED_PASS  password it reports (unset = no credential stored)
+#   FAKE_GIT_LOG        file every invocation is appended to
+set -u
+
+if [ -n "${FAKE_GIT_LOG:-}" ]; then
+    printf 'git %s\n' "$*" >> "$FAKE_GIT_LOG"
+fi
+
+case "${1:-}" in
+    config)
+        # Only the read form the launcher uses: `git config --get <key>`.
+        [ "${2:-}" = "--get" ] || exit 1
+        case "${3:-}" in
+            user.name)         v=${FAKE_GIT_NAME:-} ;;
+            user.email)        v=${FAKE_GIT_EMAIL:-} ;;
+            remote.origin.url) v=${FAKE_GIT_ORIGIN:-} ;;
+            *)                 v='' ;;
+        esac
+        [ -n "$v" ] || exit 1
+        printf '%s\n' "$v"
+        ;;
+    credential)
+        [ "${2:-}" = "fill" ] || exit 1
+        # Real git refuses to prompt when GIT_TERMINAL_PROMPT=0; mimic that
+        # rather than blocking, so a regression shows up as a failure and not
+        # as a wedged test run.
+        if [ -z "${FAKE_GIT_CRED_PASS:-}" ]; then
+            if [ "${GIT_TERMINAL_PROMPT:-}" = "0" ]; then
+                printf 'fatal: could not read Username: terminal prompts disabled\n' >&2
+                exit 128
+            fi
+            printf 'fake git: would have blocked on a terminal prompt\n' >&2
+            exit 128
+        fi
+        # Echo the request back with the answer appended, as git does.
+        while IFS= read -r line; do
+            [ -n "$line" ] || break
+            printf '%s\n' "$line"
+        done
+        printf 'username=%s\n' "${FAKE_GIT_CRED_USER:-fakeuser}"
+        printf 'password=%s\n' "$FAKE_GIT_CRED_PASS"
+        ;;
+    --version)
+        printf 'git version 2.99.0-fake\n'
+        ;;
+    *)
+        exit 1
+        ;;
+esac

@@ -310,3 +310,195 @@ refute_tmux_log() {
     argv_has "codex"
     refute_output_contains 'claude'
 }
+
+# --- git identity and credentials ------------------------------------------
+# All of these run against the fake git and gh in fixtures/fakebin, never the
+# real ones: see the git pinning in common_setup for why that matters.
+
+argv_lacks() {
+    if grep -qF -- "$1" "$FAKE_DOCKER_ARGV"; then
+        printf -- '--- argv ---\n%s\n' "$(cat "$FAKE_DOCKER_ARGV")" >&2
+        fail_with "expected NO argument containing: $1"
+    fi
+    return 0
+}
+
+@test "the host git identity is passed through so the agent can commit" {
+    cd "$PROJECT"
+    export FAKE_GIT_NAME="Ada Lovelace" FAKE_GIT_EMAIL=ada@example.com
+    run bash "$LAUNCH"
+    assert_success
+    argv_has "GIT_CONFIG_KEY_0=user.name"
+    argv_has "GIT_CONFIG_VALUE_0=Ada Lovelace"
+    argv_has "GIT_CONFIG_KEY_1=user.email"
+    argv_has "GIT_CONFIG_VALUE_1=ada@example.com"
+    argv_has "GIT_CONFIG_COUNT=2"
+}
+
+@test "an email but no name still yields a usable, correctly counted config" {
+    cd "$PROJECT"
+    export FAKE_GIT_EMAIL=ada@example.com
+    run bash "$LAUNCH"
+    assert_success
+    argv_has "GIT_CONFIG_KEY_0=user.email"
+    argv_has "GIT_CONFIG_COUNT=1"
+}
+
+@test "no git identity on the host means no git environment at all" {
+    cd "$PROJECT"
+    run bash "$LAUNCH"
+    assert_success
+    argv_lacks "GIT_CONFIG_COUNT"
+    argv_lacks "GIT_CONFIG_KEY_0"
+}
+
+@test "a host without git launches normally rather than failing" {
+    cd "$PROJECT"
+    PATH="$(path_without git)" run bash "$LAUNCH"
+    assert_success
+    argv_has "--cap-drop=ALL"
+    argv_lacks "GIT_CONFIG_COUNT"
+}
+
+@test "SANDBOX_NO_GIT suppresses identity and credentials entirely" {
+    cd "$PROJECT"
+    export FAKE_GIT_NAME="Ada Lovelace" FAKE_GIT_EMAIL=ada@example.com
+    export SANDBOX_NO_GIT=1
+    run bash "$LAUNCH"
+    assert_success
+    argv_lacks "GIT_CONFIG_COUNT"
+}
+
+@test "no credential is forwarded unless --sandbox-git is given" {
+    cd "$PROJECT"
+    export FAKE_GIT_NAME=Ada FAKE_GIT_EMAIL=ada@example.com
+    export FAKE_GIT_ORIGIN=https://github.com/ada/looms.git
+    export FAKE_GIT_CRED_USER=ada FAKE_GIT_CRED_PASS=s3cret
+    run bash "$LAUNCH"
+    assert_success
+    argv_has "GIT_CONFIG_KEY_0=user.name"
+    argv_lacks "SANDBOX_GIT_TOKEN"
+    argv_lacks "s3cret"
+    argv_lacks "credential."
+}
+
+@test "--sandbox-git forwards a credential scoped to the origin's host" {
+    cd "$PROJECT"
+    export FAKE_GIT_NAME=Ada FAKE_GIT_EMAIL=ada@example.com
+    export FAKE_GIT_ORIGIN=https://github.com/ada/looms.git
+    export FAKE_GIT_CRED_USER=ada FAKE_GIT_CRED_PASS=s3cret
+    run bash "$LAUNCH" --sandbox-git
+    assert_success
+    argv_has "SANDBOX_GIT_USER=ada"
+    argv_has "SANDBOX_GIT_TOKEN=s3cret"
+    argv_has "GIT_CONFIG_KEY_2=credential.https://github.com.helper"
+    argv_has "GIT_CONFIG_COUNT=3"
+    # The helper must name the container's variables, not expand them here.
+    grep -qF 'SANDBOX_GIT_TOKEN"' "$FAKE_DOCKER_ARGV" \
+        || fail_with "the credential helper did not reach the container intact"
+}
+
+@test "--sandbox-git strips the flag rather than passing it to the agent" {
+    cd "$PROJECT"
+    run bash "$LAUNCH" --sandbox-git --dangerously-skip-permissions
+    assert_success
+    argv_has "--dangerously-skip-permissions"
+    argv_lacks "--sandbox-git"
+}
+
+@test "--sandbox-git on an ssh remote says so instead of forwarding nothing quietly" {
+    cd "$PROJECT"
+    export FAKE_GIT_ORIGIN=git@github.com:ada/looms.git
+    export FAKE_GIT_CRED_USER=ada FAKE_GIT_CRED_PASS=s3cret
+    run bash "$LAUNCH" --sandbox-git
+    assert_success
+    assert_output_contains "no https remote"
+    argv_lacks "SANDBOX_GIT_TOKEN"
+}
+
+@test "--sandbox-git with nothing in the credential store warns and still launches" {
+    cd "$PROJECT"
+    export FAKE_GIT_ORIGIN=https://github.com/ada/looms.git
+    run bash "$LAUNCH" --sandbox-git
+    assert_success
+    assert_output_contains "no credential stored"
+    argv_lacks "SANDBOX_GIT_TOKEN"
+    argv_has "--cap-drop=ALL"
+}
+
+@test "GH_TOKEN is preferred over the credential store for github.com" {
+    cd "$PROJECT"
+    export FAKE_GIT_ORIGIN=https://github.com/ada/looms.git
+    export FAKE_GIT_CRED_USER=ada FAKE_GIT_CRED_PASS=from-store
+    export GH_TOKEN=from-env
+    run bash "$LAUNCH" --sandbox-git
+    assert_success
+    argv_has "SANDBOX_GIT_TOKEN=from-env"
+    argv_lacks "from-store"
+}
+
+@test "gh supplies the token when the credential store has none" {
+    cd "$PROJECT"
+    export FAKE_GIT_ORIGIN=https://github.com/ada/looms.git
+    export FAKE_GH_TOKEN=from-gh
+    run bash "$LAUNCH" --sandbox-git
+    assert_success
+    argv_has "SANDBOX_GIT_TOKEN=from-gh"
+    argv_has "SANDBOX_GIT_USER=x-access-token"
+}
+
+@test "a non-github https remote still gets its own scoped helper" {
+    cd "$PROJECT"
+    export FAKE_GIT_ORIGIN=https://gitlab.example.org/ada/looms.git
+    export FAKE_GIT_CRED_USER=ada FAKE_GIT_CRED_PASS=s3cret
+    run bash "$LAUNCH" --sandbox-git
+    assert_success
+    argv_has "GIT_CONFIG_KEY_0=credential.https://gitlab.example.org.helper"
+}
+
+@test "userinfo in the remote URL does not confuse the host scoping" {
+    cd "$PROJECT"
+    export FAKE_GIT_ORIGIN=https://ada@github.com/ada/looms.git
+    export FAKE_GIT_CRED_USER=ada FAKE_GIT_CRED_PASS=s3cret
+    run bash "$LAUNCH" --sandbox-git
+    assert_success
+    argv_has "GIT_CONFIG_KEY_0=credential.https://github.com.helper"
+}
+
+@test "--sandbox-git composes with --sandbox-tmux by way of the session env" {
+    cd "$PROJECT"
+    export FAKE_GIT_ORIGIN=https://github.com/ada/looms.git
+    export FAKE_GIT_CRED_USER=ada FAKE_GIT_CRED_PASS=s3cret
+    run bash "$LAUNCH" --sandbox-git --sandbox-tmux
+    assert_success
+    tmux_log_has "SANDBOX_GIT=1"
+}
+
+@test "--sandbox-git is only honoured in first position" {
+    cd "$PROJECT"
+    export FAKE_GIT_ORIGIN=https://github.com/ada/looms.git
+    export FAKE_GIT_CRED_USER=ada FAKE_GIT_CRED_PASS=s3cret
+    run bash "$LAUNCH" --print --sandbox-git
+    assert_success
+    argv_has "--sandbox-git"
+    argv_lacks "SANDBOX_GIT_TOKEN"
+}
+
+@test "--sandbox-doctor reports git state without ever printing the token" {
+    cd "$PROJECT"
+    export FAKE_GIT_NAME="Ada Lovelace" FAKE_GIT_EMAIL=ada@example.com
+    export FAKE_GIT_ORIGIN=https://github.com/ada/looms.git
+    export FAKE_GIT_CRED_USER=ada FAKE_GIT_CRED_PASS=s3cret
+    run bash "$LAUNCH" --sandbox-doctor
+    assert_success
+    assert_output_contains "Ada Lovelace <ada@example.com>"
+    assert_output_contains "available for github.com"
+    refute_output_contains "s3cret"
+}
+
+@test "--sandbox-doctor names a missing identity as the reason commits fail" {
+    cd "$PROJECT"
+    run bash "$LAUNCH" --sandbox-doctor
+    assert_success
+    assert_output_contains "NONE configured"
+}

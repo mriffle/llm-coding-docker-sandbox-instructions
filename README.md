@@ -63,10 +63,46 @@ Everything else you pass is handed to the agent untouched. The launcher recognis
 
 | Flag | What it does |
 | --- | --- |
+| `--sandbox-git` | also forward a git credential, so the agent can push — see [Git](#git) |
 | `--sandbox-tmux` / `--sandbox-tmux-detached` | run inside a tmux session for this project |
 | `--sandbox-doctor` | report on image, volumes, UIDs, versions — start here when something's wrong |
 | `--sandbox-upgrade` | re-run the installer to update |
 | `--sandbox-version` / `--sandbox-help` | version, and the list above |
+
+## Git
+
+**Your name and email are passed in automatically**, so the agent can commit.
+Without them `git commit` fails outright inside the container ("Author identity
+unknown"), and an autonomous agent works around that by inventing an identity —
+either one that vanishes at session exit, or one it writes into your real
+`.git/config` through the bind mount. The launcher reads the *effective*
+`user.name` / `user.email` from the directory you launch in, so a repo-local
+override is respected. No secret is involved and nothing is mounted.
+
+**Pushing needs `--sandbox-git`**, which is opt-in per session:
+
+```bash
+claude-sandbox --sandbox-git --dangerously-skip-permissions
+```
+
+That resolves a credential on the *host* — from `$GH_TOKEN`, else `gh auth
+token`, else your own git credential helper — and passes it in as environment.
+Because the host does the lookup, it works the same whether your credentials
+live in macOS Keychain, Windows Credential Manager, libsecret, or a plain file;
+the container never learns which.
+
+Two limits worth knowing:
+
+- **HTTPS remotes only.** An `ssh://` or `git@host:path` remote never consults a
+  credential helper, so there is nothing to forward. The launcher says so rather
+  than failing later.
+- **Scoped to the origin's host, not to the repo.** The credential is installed
+  as `credential.https://<host>.helper`, so it is never offered to any other
+  host — but within that host, whatever the token can reach, the agent can
+  reach. Use a fine-grained token.
+
+`--sandbox-doctor` reports what would be passed (never the credential itself),
+and `SANDBOX_NO_GIT=1` turns the whole thing off.
 
 ## Upgrading
 
@@ -120,6 +156,7 @@ Nothing outside these paths is touched, except one guarded two-line block append
 | `~/.claude` | `claude-config-$USER` volume | auth, settings, plugins, session history — permanent |
 | `~/.local` | `claude-local-$USER` volume | auto-updated Claude binary — permanent |
 | `~/.codex` | `codex-config-$USER` volume | auth, `config.toml`, state DB — permanent |
+| git identity (and, with `--sandbox-git`, a credential) | environment only | that session — never written to a volume or a file |
 | everything else (`~/.cargo`, `~/.npm-global`, …) | container layer | discarded at session exit |
 
 Plugins installed via `/plugin install` live in the config volume, so they persist and are shared across all of that user's projects.
@@ -152,7 +189,8 @@ If something looks wrong, `claude-sandbox --sandbox-doctor` (or `codex-sandbox -
 ## Security notes
 
 - **The container is the entire boundary.** In bypass/yolo mode, a prompt-injected or misbehaving session can do anything *inside* it: modify the mounted project, read the agent credentials in its volume, and reach the open network. Only run against repositories you trust.
-- **Never mount host secrets** (`~/.ssh`, cloud credential files, `~/.gitconfig` with tokens) into the container. Prefer repo-scoped or short-lived tokens passed per session (`-e GH_TOKEN=...`) when needed.
+- **Never mount host secrets** (`~/.ssh`, cloud credential files, `~/.gitconfig` with tokens) into the container. The launchers mount no host path but `$PWD`, and nothing here changes that: git identity and, with `--sandbox-git`, a git credential are passed as *environment*, resolved on the host, for one session.
+- **A forwarded git credential is a real grant.** `--sandbox-git` is opt-in per launch for that reason. It is scoped to the origin remote's host, but within that host the token's own permissions apply, and an autonomous session that is prompt-injected can use it or exfiltrate it (egress is open — see below). Prefer a fine-grained, revocable token over one with broad `repo` scope, and leave the flag off when the agent has no reason to push. Identity alone (the default) carries no secret.
 - **Egress is unrestricted by default** in these launchers. For defense against exfiltration, adapt the default-deny firewall from Anthropic's [reference devcontainer](https://github.com/anthropics/claude-code/tree/main/.devcontainer) (`init-firewall.sh` + `NET_ADMIN`/`NET_RAW` caps) — and be prepared to maintain a domain allowlist for package registries your projects use.
 - **No Docker socket, no privileged flags.** The images contain no Docker client; if you ever add one, mounting the host Docker socket into an autonomous agent's container is a sandbox escape (root-equivalent on rootful daemons). Keep it out, or make it a conscious opt-in.
 - **Non-root inside the container** (`agent` user) is required by Claude Code's bypass flag and is good hygiene for both agents regardless.

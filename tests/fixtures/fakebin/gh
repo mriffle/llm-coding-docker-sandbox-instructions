@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+#
+# A stand-in for the GitHub CLI. It exists mainly to make sure the launcher's
+# credential probe can never reach a real `gh auth token` during a test run —
+# this repo's own developer machines have gh installed and logged in.
+#
+# Driven by:
+#   FAKE_GH_TOKEN   token `gh auth token` returns (unset = not logged in)
+#   FAKE_GH_LOG     file every invocation is appended to
+set -u
+
+if [ -n "${FAKE_GH_LOG:-}" ]; then
+    printf 'gh %s\n' "$*" >> "$FAKE_GH_LOG"
+fi
+
+case "${1:-} ${2:-}" in
+    "auth token")
+        [ -n "${FAKE_GH_TOKEN:-}" ] || {
+            printf 'gh: not logged in\n' >&2
+            exit 1
+        }
+        printf '%s\n' "$FAKE_GH_TOKEN"
+        ;;
+    *)
+        exit 1
+        ;;
+esac

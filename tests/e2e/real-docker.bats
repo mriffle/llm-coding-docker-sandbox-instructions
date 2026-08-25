@@ -180,6 +180,94 @@ assert_output_contains() { case "$output" in *"$1"*) return 0 ;; *) fail_with "e
     [ "$output" = "$(id -u)" ]
 }
 
+
+# What the fake-docker tier cannot prove: that the environment the launcher
+# builds is one a *real* git, in the real image, actually accepts. That the
+# launcher emits exactly these arguments is asserted in launcher.bats; here we
+# check the other half of the contract, against a real container.
+#
+# The launcher itself is not invoked: it runs `docker run -it`, which cannot
+# attach under bats (stdin is not a terminal). The env below is verbatim what
+# launcher.bats asserts on.
+#
+# GIT_CONFIG_COUNT needs git >= 2.31, so a commit succeeding here is also the
+# check that the image's git is new enough.
+@test "e2e: the identity env the launcher passes makes a real commit work" {
+    local proj="$BATS_TEST_TMPDIR/repo"
+    mkdir -p "$proj"
+    git -C "$proj" init -q
+    printf 'hello\n' > "$proj/f.txt"
+    git -C "$proj" add f.txt
+
+    run docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \
+        -v "$proj:/workspace" \
+        -e GIT_CONFIG_COUNT=2 \
+        -e GIT_CONFIG_KEY_0=user.name  -e "GIT_CONFIG_VALUE_0=E2E Tester" \
+        -e GIT_CONFIG_KEY_1=user.email -e GIT_CONFIG_VALUE_1=e2e@example.com \
+        --cap-drop=ALL --security-opt=no-new-privileges \
+        "$CLAUDE_IMAGE" git commit -m "from the sandbox"
+    assert_success
+
+    run git -C "$proj" log -1 --format='%an <%ae>'
+    assert_success
+    [ "$output" = "E2E Tester <e2e@example.com>" ] \
+        || fail_with "commit landed with the wrong author: $output"
+
+    # And the config reads back, which GIT_AUTHOR_* would not give us.
+    run docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \
+        -v "$proj:/workspace" \
+        -e GIT_CONFIG_COUNT=2 \
+        -e GIT_CONFIG_KEY_0=user.name  -e "GIT_CONFIG_VALUE_0=E2E Tester" \
+        -e GIT_CONFIG_KEY_1=user.email -e GIT_CONFIG_VALUE_1=e2e@example.com \
+        "$CLAUDE_IMAGE" git config --get user.email
+    assert_success
+    [ "$output" = "e2e@example.com" ] || fail_with "config did not read back: $output"
+}
+
+@test "e2e: with no identity the same commit fails, as it did before this feature" {
+    local proj="$BATS_TEST_TMPDIR/repo-noident"
+    mkdir -p "$proj"
+    git -C "$proj" init -q
+    printf 'hello\n' > "$proj/f.txt"
+    git -C "$proj" add f.txt
+
+    run docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \
+        -v "$proj:/workspace" \
+        --cap-drop=ALL --security-opt=no-new-privileges \
+        "$CLAUDE_IMAGE" git commit -m nope
+    [ "$status" -ne 0 ] || fail_with "expected the commit to fail without an identity"
+    assert_output_contains "Please tell me who you are"
+}
+
+# The credential helper is a shell snippet that survives two levels of embedding
+# (build.sh splices it into a quoted heredoc inside the installer). This proves
+# it arrives intact and that a real git will call it — and that it is scoped to
+# one host, so another host gets nothing.
+@test "e2e: the forwarded credential helper works and is scoped to one host" {
+    local helper
+    helper='!f(){ test "$1" = get && printf "username=%s\npassword=%s\n" "$SANDBOX_GIT_USER" "$SANDBOX_GIT_TOKEN"; }; f'
+
+    run docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \
+        -e SANDBOX_GIT_USER=ada -e SANDBOX_GIT_TOKEN=s3cret \
+        -e GIT_CONFIG_COUNT=1 \
+        -e "GIT_CONFIG_KEY_0=credential.https://github.com.helper" \
+        -e "GIT_CONFIG_VALUE_0=$helper" \
+        "$CLAUDE_IMAGE" sh -c 'printf "protocol=https\nhost=github.com\n\n" | git credential fill'
+    assert_success
+    assert_output_contains "username=ada"
+    assert_output_contains "password=s3cret"
+
+    run docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \
+        -e SANDBOX_GIT_USER=ada -e SANDBOX_GIT_TOKEN=s3cret \
+        -e GIT_TERMINAL_PROMPT=0 \
+        -e GIT_CONFIG_COUNT=1 \
+        -e "GIT_CONFIG_KEY_0=credential.https://github.com.helper" \
+        -e "GIT_CONFIG_VALUE_0=$helper" \
+        "$CLAUDE_IMAGE" sh -c 'printf "protocol=https\nhost=gitlab.com\n\n" | git credential fill'
+    [ "$status" -ne 0 ] || fail_with "another host was served the credential"
+    case "$output" in *s3cret*) fail_with "the token leaked to another host" ;; esac
+}
+
 @test "e2e: uninstall removes the image but keeps the login volumes" {
     run bash "$REPO_ROOT/install/codex.sh" --uninstall
     assert_success

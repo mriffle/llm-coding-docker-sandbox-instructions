@@ -184,6 +184,9 @@ exec docker run -it --rm \
   -v "$PWD:/workspace" \
   -v "$CONFIG_VOL:/home/agent/.claude" \
   -v "$LOCAL_VOL:/home/agent/.local" \
+  -e "GIT_CONFIG_COUNT=2" \
+  -e "GIT_CONFIG_KEY_0=user.name"  -e "GIT_CONFIG_VALUE_0=$(git config --get user.name)" \
+  -e "GIT_CONFIG_KEY_1=user.email" -e "GIT_CONFIG_VALUE_1=$(git config --get user.email)" \
   --cap-drop=ALL \
   --security-opt=no-new-privileges \
   claude-sandbox-$USER claude "$@"
@@ -193,6 +196,21 @@ Notes:
 
 - `docker volume create` is idempotent — it does real work exactly once per user, then no-ops. Named volumes are **not** deleted by `--rm`; they persist until `docker volume rm`.
 - The container name includes user, project, and timestamp so concurrent sessions (and concurrent users) don't collide.
+- **The `GIT_CONFIG_*` block is what lets the agent commit.** With no git identity in the container, `git commit` fails with "Author identity unknown". `GIT_CONFIG_COUNT`/`KEY`/`VALUE` sets real config, so `git config --get user.email` reads back correctly for hooks and tooling — `GIT_AUTHOR_*` would set the commit but leave the config empty. Drop the block (or set `COUNT=0`) if you have no identity configured on the host; the installed launcher probes first and omits it.
+- **To let the agent push**, additionally pass a credential for the remote's host. Resolve it on the host, so you never mount a secret:
+
+  ```bash
+  host=github.com
+  eval "$(printf 'protocol=https\nhost=%s\n\n' "$host" \
+      | GIT_TERMINAL_PROMPT=0 git credential fill \
+      | sed -n 's/^username=/u=/p; s/^password=/p=/p')"
+  # ...then add to the docker run above (bumping GIT_CONFIG_COUNT to 3):
+  #   -e "SANDBOX_GIT_USER=$u" -e "SANDBOX_GIT_TOKEN=$p" \
+  #   -e "GIT_CONFIG_KEY_2=credential.https://$host.helper" \
+  #   -e 'GIT_CONFIG_VALUE_2=!f(){ test "$1" = get && printf "username=%s\npassword=%s\n" "$SANDBOX_GIT_USER" "$SANDBOX_GIT_TOKEN"; }; f'
+  ```
+
+  `GIT_TERMINAL_PROMPT=0` matters — without it a missing credential makes git prompt on the terminal instead of declining. The helper key is scoped to one host, so the credential is never offered to another; within that host, the token's own permissions apply. The installed launcher does all of this behind `--sandbox-git`.
 - No resource limits are set. If runaway sessions on a shared box ever become a problem, add `--memory`, `--cpus`, and `--pids-limit` here.
 
 ### Setup (per user)
@@ -377,10 +395,17 @@ exec docker run -it --rm \
   --name "codex-$USER-$(basename "$PWD")-$(date +%s)" \
   -v "$PWD:/workspace" \
   -v "$CONFIG_VOL:/home/agent/.codex" \
+  -e "GIT_CONFIG_COUNT=2" \
+  -e "GIT_CONFIG_KEY_0=user.name"  -e "GIT_CONFIG_VALUE_0=$(git config --get user.name)" \
+  -e "GIT_CONFIG_KEY_1=user.email" -e "GIT_CONFIG_VALUE_1=$(git config --get user.email)" \
   --cap-drop=ALL \
   --security-opt=no-new-privileges \
   codex-sandbox-$USER codex "$@"
 ```
+
+> The `GIT_CONFIG_*` block is the same one explained under the Claude launcher
+> above, and for the same reason: without it `git commit` fails inside the
+> container. The credential recipe there applies here unchanged.
 
 > The default `SANDBOX_SRC` matches the `~/codex-sandbox` location used above;
 > if you put the Dockerfile elsewhere, edit that line or export
@@ -469,7 +494,8 @@ The images deliberately omit occasional-use toolchains (Java, Go, etc.). Project
 ## Security notes
 
 - **The container is the entire boundary.** In bypass/yolo mode, a prompt-injected or misbehaving session can do anything *inside* it: modify the mounted project, read the agent credentials in its volume, and reach the open network. Only run against repositories you trust.
-- **Never mount host secrets** (`~/.ssh`, cloud credential files, `~/.gitconfig` with tokens) into the container. Prefer repo-scoped or short-lived tokens passed per session (`-e GH_TOKEN=...`) when needed.
+- **Never mount host secrets** (`~/.ssh`, cloud credential files, `~/.gitconfig` with tokens) into the container. Pass git identity and, when the agent genuinely needs to push, a git credential as *environment* instead — resolved on the host, for one session. The Launcher sections above show both.
+- **A forwarded git credential is a real grant.** Scope it to the remote's host (the `credential.https://<host>.helper` form above), and remember that within that host the token's own permissions apply. An autonomous session that is prompt-injected can use it or exfiltrate it, since egress is open. Prefer a fine-grained, revocable token, and pass none at all when the agent only needs to commit locally.
 - **Egress is unrestricted by default** in these launchers. For defense against exfiltration, adapt the default-deny firewall from Anthropic's [reference devcontainer](https://github.com/anthropics/claude-code/tree/main/.devcontainer) (`init-firewall.sh` + `NET_ADMIN`/`NET_RAW` caps) — and be prepared to maintain a domain allowlist for package registries your projects use.
 - **No Docker socket, no privileged flags.** The images contain no Docker client; if you ever add one, mounting the host Docker socket into an autonomous agent's container is a sandbox escape (root-equivalent on rootful daemons). Keep it out, or make it a conscious opt-in.
 - **Non-root inside the container** (`agent` user) is required by Claude Code's bypass flag and is good hygiene for both agents regardless.

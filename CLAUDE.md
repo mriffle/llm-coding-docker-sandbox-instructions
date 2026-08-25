@@ -56,7 +56,15 @@ Four tiers, `tools/test.sh [build|lint|unit|intg|e2e]`:
 | `intg` | the built installers and launchers against a scripted fake `docker` |
 | `e2e` | real Docker — real images, real UIDs, real volumes |
 
-The fake `docker`, `curl`, `tmux` and `wsl.exe` live in `tests/fixtures/fakebin`.
+The fake `docker`, `curl`, `tmux`, `wsl.exe`, `git` and `gh` live in
+`tests/fixtures/fakebin`. The last two are not optional niceties: the launcher
+reads the host's git identity and, with `--sandbox-git`, its credential store.
+Left unfaked, a suite run on a developer box reads a **real** identity — and,
+with `credential.helper=store`, a **real token** — straight into
+`$FAKE_DOCKER_ARGV`, which `fail_with` dumps into the CI log. `common_setup`
+pins `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_NOSYSTEM`, `XDG_CONFIG_HOME` and
+`GIT_TERMINAL_PROMPT` for the same reason; a throwaway `HOME` alone does not
+close it.
 Production code carries deliberate test seams, all named `SANDBOX_FAKE_*`:
 `SANDBOX_FAKE_UID`, `SANDBOX_FAKE_UNAME_S`, `SANDBOX_OS_RELEASE`,
 `SANDBOX_PROC_VERSION`, `SANDBOX_FAKE_EUID`, and so on.

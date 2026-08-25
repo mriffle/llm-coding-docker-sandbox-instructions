@@ -29,6 +29,24 @@ common_setup() {
     export NO_COLOR=1
     # Real network calls have no place in a unit or integration test.
     export SANDBOX_NO_UPDATE_CHECK=1
+    # Pin the whole git surface. A throwaway HOME is not enough on its own:
+    # XDG_CONFIG_HOME, /etc/gitconfig and inherited GIT_* variables all reach
+    # around it, and half the launcher tests run with cwd inside this very
+    # repository. Left unpinned, a developer's real identity — or, with
+    # credential.helper=store, a real token — could be read by the launcher and
+    # land in $FAKE_DOCKER_ARGV, which fail_with dumps into the CI log.
+    export XDG_CONFIG_HOME="$HOME/.config"
+    export GIT_CONFIG_GLOBAL="$HOME/.gitconfig"
+    export GIT_CONFIG_NOSYSTEM=1
+    export GIT_TERMINAL_PROMPT=0
+    unset GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
+    unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0
+    unset GH_TOKEN GITHUB_TOKEN
+    # The fake git on PATH answers from these; tests that want an identity or a
+    # credential set them explicitly.
+    unset FAKE_GIT_NAME FAKE_GIT_EMAIL FAKE_GIT_ORIGIN
+    unset FAKE_GIT_CRED_USER FAKE_GIT_CRED_PASS
+    unset FAKE_GH_TOKEN
 }
 
 common_teardown() {
@@ -71,7 +89,7 @@ path_excluding() {
 path_without() {
     local skip=$1 t dir="$TESTDIR/without-$skip"
     mkdir -p "$dir"
-    for t in docker curl tmux wsl.exe; do
+    for t in docker curl tmux wsl.exe git gh; do
         [ "$t" = "$skip" ] && continue
         ln -sf "$REPO_ROOT/tests/fixtures/fakebin/$t" "$dir/$t"
     done

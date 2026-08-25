@@ -90,6 +90,8 @@ if wants lint; then
                  "$ROOT"/tests/fixtures/fakebin/curl \
                  "$ROOT"/tests/fixtures/fakebin/tmux \
                  "$ROOT"/tests/fixtures/fakebin/wsl.exe \
+                 "$ROOT"/tests/fixtures/fakebin/git \
+                 "$ROOT"/tests/fixtures/fakebin/gh \
                  "$ROOT"/.tmp/lint/claude-sandbox "$ROOT"/.tmp/lint/codex-sandbox; then
                 pass "shellcheck (installers, launchers, tools, fixtures)"
             else

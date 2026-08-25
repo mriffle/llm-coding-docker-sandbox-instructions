@@ -360,3 +360,92 @@ ps_install() {
     refute_output_contains 'Log in once'
     assert_output_contains '--sandbox-doctor'
 }
+
+# --- git identity and credentials (mirrors launcher.bats) ------------------
+
+ps_argv_lacks() {
+    if grep -qF -- "$1" "$FAKE_DOCKER_ARGV"; then
+        printf -- '--- argv ---\n%s\n' "$(cat "$FAKE_DOCKER_ARGV")" >&2
+        fail_with "expected NO argument containing: $1"
+    fi
+    return 0
+}
+
+@test "ps launcher: the host git identity is passed through" {
+    ps_install claude
+    mkdir -p "$TESTDIR/proj"; cd "$TESTDIR/proj"
+    export FAKE_GIT_NAME="Ada Lovelace" FAKE_GIT_EMAIL=ada@example.com
+    : > "$FAKE_DOCKER_ARGV"
+    run "$PWSH" -NoProfile -File "$LAUNCHER"
+    assert_success
+    # A whole-line match, so a value containing a space is still exact.
+    grep -qxF -- "GIT_CONFIG_VALUE_0=Ada Lovelace" "$FAKE_DOCKER_ARGV"
+    grep -qxF -- "GIT_CONFIG_KEY_1=user.email" "$FAKE_DOCKER_ARGV"
+    grep -qxF -- "GIT_CONFIG_COUNT=2" "$FAKE_DOCKER_ARGV"
+}
+
+@test "ps launcher: no identity means no git environment and no empty -e" {
+    ps_install claude
+    mkdir -p "$TESTDIR/proj"; cd "$TESTDIR/proj"
+    : > "$FAKE_DOCKER_ARGV"
+    run "$PWSH" -NoProfile -File "$LAUNCHER"
+    assert_success
+    ps_argv_lacks "GIT_CONFIG_COUNT"
+    # An empty value must never reach docker as a bare `-e ''`. PowerShell will
+    # happily splat one: @('-e','') becomes a real, malformed argv entry, and
+    # the fake docker records every argument on its own line — so an empty line
+    # here is exactly that bug.
+    if grep -qx -- '' "$FAKE_DOCKER_ARGV"; then
+        fail_with "an empty argument reached docker"
+    fi
+}
+
+@test "ps launcher: --sandbox-git forwards a host-scoped credential" {
+    ps_install claude
+    mkdir -p "$TESTDIR/proj"; cd "$TESTDIR/proj"
+    export FAKE_GIT_NAME=Ada FAKE_GIT_EMAIL=ada@example.com
+    export FAKE_GIT_ORIGIN=https://github.com/ada/looms.git
+    export FAKE_GIT_CRED_USER=ada FAKE_GIT_CRED_PASS=s3cret
+    : > "$FAKE_DOCKER_ARGV"
+    run "$PWSH" -NoProfile -File "$LAUNCHER" --sandbox-git
+    assert_success
+    grep -qxF -- "SANDBOX_GIT_USER=ada" "$FAKE_DOCKER_ARGV"
+    grep -qxF -- "SANDBOX_GIT_TOKEN=s3cret" "$FAKE_DOCKER_ARGV"
+    grep -qxF -- "GIT_CONFIG_KEY_2=credential.https://github.com.helper" "$FAKE_DOCKER_ARGV"
+    ps_argv_lacks "--sandbox-git"
+}
+
+@test "ps launcher: no credential without the flag" {
+    ps_install claude
+    mkdir -p "$TESTDIR/proj"; cd "$TESTDIR/proj"
+    export FAKE_GIT_ORIGIN=https://github.com/ada/looms.git
+    export FAKE_GIT_CRED_USER=ada FAKE_GIT_CRED_PASS=s3cret
+    : > "$FAKE_DOCKER_ARGV"
+    run "$PWSH" -NoProfile -File "$LAUNCHER"
+    assert_success
+    ps_argv_lacks "s3cret"
+}
+
+@test "ps launcher: SANDBOX_NO_GIT suppresses everything" {
+    ps_install claude
+    mkdir -p "$TESTDIR/proj"; cd "$TESTDIR/proj"
+    export FAKE_GIT_NAME=Ada FAKE_GIT_EMAIL=ada@example.com
+    export SANDBOX_NO_GIT=1
+    : > "$FAKE_DOCKER_ARGV"
+    run "$PWSH" -NoProfile -File "$LAUNCHER"
+    assert_success
+    ps_argv_lacks "GIT_CONFIG_COUNT"
+}
+
+@test "ps launcher: --sandbox-doctor reports git state without the token" {
+    ps_install claude
+    mkdir -p "$TESTDIR/proj"; cd "$TESTDIR/proj"
+    export FAKE_GIT_NAME="Ada Lovelace" FAKE_GIT_EMAIL=ada@example.com
+    export FAKE_GIT_ORIGIN=https://github.com/ada/looms.git
+    export FAKE_GIT_CRED_USER=ada FAKE_GIT_CRED_PASS=s3cret
+    run "$PWSH" -NoProfile -File "$LAUNCHER" --sandbox-doctor
+    assert_success
+    assert_output_contains 'Ada Lovelace <ada@example.com>'
+    assert_output_contains 'available for github.com'
+    refute_output_contains 's3cret'
+}
