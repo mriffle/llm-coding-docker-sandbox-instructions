@@ -1,0 +1,6 @@
+# Codex autonomy inside the container. The container is the security
+# boundary, so Codex's own OS-level sandbox is turned off and approvals
+# are disabled. Seeded by the agent-sandbox installer (v@@VERSION@@);
+# your edits here are preserved across upgrades.
+approval_policy = "never"
+sandbox_mode = "danger-full-access"

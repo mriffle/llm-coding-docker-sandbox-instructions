@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Stand-in for curl so tests never touch the network.
+#   FAKE_NPM_FAIL=1        the npm registry lookup fails
+#   FAKE_CODEX_VERSION     version reported by the npm registry
+#   FAKE_UPSTREAM_VERSION  version reported by the repo's VERSION file
+#   FAKE_CURL_LOG          file to append requested URLs to
+set -u
+url=''
+for a in "$@"; do case "$a" in http://*|https://*) url=$a ;; esac; done
+[ -z "${FAKE_CURL_LOG:-}" ] || printf '%s\n' "$url" >> "$FAKE_CURL_LOG"
+case "$url" in
+    *registry.npmjs.org*)
+        [ -z "${FAKE_NPM_FAIL:-}" ] || exit 7
+        printf '{"name":"@openai/codex","version":"%s"}\n' "${FAKE_CODEX_VERSION:-1.2.3}" ;;
+    */install/claude.sh|*/install/codex.sh)
+        cat "${FAKE_INSTALLER_DIR:-$PWD/install}/$(basename "$url")" ;;
+    */VERSION)
+        [ -z "${FAKE_VERSION_FETCH_FAIL:-}" ] || exit 7
+        printf '%s\n' "${FAKE_UPSTREAM_VERSION:-0.0.0}" ;;
+    *) exit 7 ;;
+esac

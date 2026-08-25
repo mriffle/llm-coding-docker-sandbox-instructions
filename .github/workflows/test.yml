@@ -1,0 +1,162 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # install/ is generated from src/. Nothing else matters if they disagree.
+  generated-files-are-fresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: install/ matches a fresh build of src/
+        run: tools/build.sh --check
+
+  lint-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Vendor the test toolchain
+        run: tools/fetch-tools.sh --with-pwsh
+      - name: Lint, unit and integration tiers
+        run: tools/test.sh build lint unit intg
+
+  # macOS matters for two reasons the Linux job cannot cover: BSD userland
+  # (stat, sed, df) and bash 3.2, which is still what /bin/bash is there.
+  macos:
+    runs-on: macos-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Force the system bash 3.2 to the front of PATH
+        run: |
+          mkdir -p "$RUNNER_TEMP/oldbash"
+          ln -sf /bin/bash "$RUNNER_TEMP/oldbash/bash"
+          echo "$RUNNER_TEMP/oldbash" >> "$GITHUB_PATH"
+      - name: Confirm we are really testing bash 3.2
+        run: bash --version | head -1
+      - name: Vendor the test toolchain
+        run: tools/fetch-tools.sh
+      - name: Lint, unit and integration tiers
+        run: tools/test.sh build lint unit intg
+
+  # Real images, real UIDs, real volumes. Only Linux runners have a Linux
+  # Docker daemon, so this is the one place true end-to-end can run.
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Show the daemon we are testing against
+        run: docker info | head -20
+      - name: Vendor bats
+        run: tools/fetch-tools.sh
+      - name: End-to-end against real docker
+        run: tools/test.sh e2e
+
+  # windows-latest can only run Windows containers, so the PowerShell suite's
+  # behavioural tests live in the Linux job (under pwsh). What is verified
+  # natively here is that the scripts parse, analyse and start on real Windows.
+  windows-smoke:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse every .ps1
+        shell: pwsh
+        run: |
+          $bad = 0
+          foreach ($f in Get-ChildItem -Path install,src -Recurse -Filter *.ps1) {
+              $errs = $null
+              [System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$null, [ref]$errs) | Out-Null
+              if ($errs) { $bad = 1; Write-Host "$($f.FullName):"; $errs | ForEach-Object { Write-Host "  $($_.Message)" } }
+          }
+          exit $bad
+      - name: PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          Install-Module PSScriptAnalyzer -Force -Scope CurrentUser -ErrorAction Stop
+          $r = Invoke-ScriptAnalyzer -Path install -Recurse -Settings tools/pssa-settings.psd1
+          if ($r) { $r | Format-Table -AutoSize | Out-String -Width 200; exit 1 }
+          Write-Host 'PSScriptAnalyzer: clean'
+      - name: The installers start and report on a real Windows host
+        shell: pwsh
+        run: |
+          # Each installer is launched as its own process: these scripts call
+          # `exit`, which would otherwise terminate the calling runspace.
+          $env:SANDBOX_STATE_DIR = Join-Path $env:RUNNER_TEMP 'sandbox-state'
+          foreach ($agent in @('claude','codex')) {
+              $script = ".\install\$agent.ps1"
+
+              $v = & pwsh -NoProfile -File $script -Version
+              if ($LASTEXITCODE -ne 0) { throw "$agent -Version exited $LASTEXITCODE" }
+              if ($v.Trim() -ne (Get-Content VERSION).Trim()) { throw "$agent reported version '$v'" }
+
+              & pwsh -NoProfile -File $script -Help | Out-Null
+              if ($LASTEXITCODE -ne 0) { throw "$agent -Help exited $LASTEXITCODE" }
+
+              # On a clean machine -Check must say "not installed" and exit 1,
+              # without needing a daemon.
+              $out = & pwsh -NoProfile -File $script -Check
+              if ($LASTEXITCODE -ne 1) { throw "$agent -Check exited $LASTEXITCODE, expected 1" }
+              if ($out -notmatch 'not installed') { throw "$agent -Check did not report 'not installed'" }
+          }
+          Write-Host 'windows smoke: ok'
+
+      - name: Preflight refuses correctly on a real Windows host
+        shell: pwsh
+        run: |
+          # This runner has Docker, but in Windows-container mode and with WSL1
+          # only — so a Linux-image install genuinely cannot proceed here. What
+          # is being tested is that the installer says so precisely instead of
+          # failing somewhere inside `docker build`.
+          $osType = (& docker info -f '{{.OSType}}' 2>&1 | Out-String).Trim()
+          Write-Host "runner docker OSType: $osType"
+          if ($osType -ne 'windows') {
+              Write-Host "::notice::runner is no longer in Windows-container mode; skipping this assertion"
+              exit 0
+          }
+          $env:SANDBOX_STATE_DIR = Join-Path $env:RUNNER_TEMP 'preflight-state'
+          foreach ($agent in @('claude','codex')) {
+              $out = & pwsh -NoProfile -File ".\install\$agent.ps1" -NoBuild 2>&1 | Out-String
+              $code = $LASTEXITCODE
+              Write-Host "--- $agent (exit $code) ---"
+              Write-Host $out
+              if ($code -ne 11) { throw "$agent should exit 11 in Windows-container mode, got $code" }
+              if ($out -notmatch 'Windows-container mode') { throw "$agent did not name Windows-container mode" }
+              if ($out -notmatch 'Switch to Linux containers') { throw "$agent did not give the fix" }
+              # It must refuse before touching anything.
+              if (Test-Path (Join-Path $env:USERPROFILE "$agent-sandbox\Dockerfile")) {
+                  throw "$agent wrote a Dockerfile despite failing preflight"
+              }
+          }
+          Write-Host 'windows preflight: refused correctly, changed nothing'
+
+      - name: The cmd shim works on real Windows
+        shell: pwsh
+        run: |
+          # Verify the batch shim's control flow (pwsh detection, quoting, %*)
+          # by pointing it at a stand-in script that just echoes its arguments.
+          $dir = Join-Path $env:RUNNER_TEMP 'shim'
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          (Get-Content src\ps\assets\claude-sandbox.cmd) -replace '@@VERSION@@','0.0.0' |
+              Set-Content (Join-Path $dir 'claude-sandbox.cmd')
+          Set-Content (Join-Path $dir 'claude-sandbox.ps1') 'Write-Host "shim-args:$args"'
+          $out = & cmd /c (Join-Path $dir 'claude-sandbox.cmd') --sandbox-version "two words"
+          if ($LASTEXITCODE -ne 0) { throw "shim exited $LASTEXITCODE" }
+          Write-Host $out
+          if ($out -notmatch 'shim-args:') { throw 'shim did not reach the PowerShell script' }
+          if ($out -notmatch 'two words') { throw 'shim lost an argument containing a space' }
+          Write-Host 'cmd shim: ok'

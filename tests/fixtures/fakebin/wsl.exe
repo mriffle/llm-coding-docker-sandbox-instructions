@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Stand-in for wsl.exe.
+#   FAKE_WSL_MODE = ok | v1 | broken
+set -u
+mode=${FAKE_WSL_MODE:-ok}
+case "$mode" in
+    broken) exit 1 ;;
+    v1) printf '  NAME      STATE           VERSION\n* Ubuntu    Running         1\n' ;;
+    *)  printf '  NAME      STATE           VERSION\n* Ubuntu    Running         2\n' ;;
+esac
+exit 0

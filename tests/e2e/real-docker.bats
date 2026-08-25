@@ -1,0 +1,197 @@
+#!/usr/bin/env bats
+# End-to-end against a real Docker daemon. Builds real images, so it is slow;
+# tools/test.sh skips this tier when no daemon is reachable.
+#
+# Everything is namespaced with a throwaway user so it can never collide with
+# (or clean up) the images and volumes of whoever is running it.
+
+REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)"
+
+setup_file() {
+    if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
+        skip "no reachable docker daemon"
+    fi
+    export E2E_USER="e2e$$"
+    export E2E_HOME="${BATS_FILE_TMPDIR:-/tmp}/e2e-home"
+    mkdir -p "$E2E_HOME"
+}
+
+teardown_file() {
+    command -v docker >/dev/null 2>&1 || return 0
+    docker info >/dev/null 2>&1 || return 0
+    for agent in claude codex; do
+        docker image rm -f "$agent-sandbox-$E2E_USER" >/dev/null 2>&1 || true
+    done
+    for vol in claude-config claude-local codex-config; do
+        docker volume rm -f "$vol-$E2E_USER" >/dev/null 2>&1 || true
+    done
+    rm -rf "$E2E_HOME"
+}
+
+setup() {
+    command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1 || skip "no reachable docker daemon"
+    export HOME="$E2E_HOME"
+    export SANDBOX_FAKE_USER="$E2E_USER"
+    export XDG_DATA_HOME="$E2E_HOME/.local/share"
+    export SANDBOX_NO_UPDATE_CHECK=1
+    export NO_COLOR=1
+    CLAUDE_IMAGE="claude-sandbox-$E2E_USER"
+    CODEX_IMAGE="codex-sandbox-$E2E_USER"
+}
+
+file_sha() {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1
+    else shasum -a 256 "$1" | cut -d' ' -f1
+    fi
+}
+
+fail_with() { printf '%s\n' "$1" >&2; printf -- '--- output ---\n%s\n' "${output:-<none>}" >&2; return 1; }
+assert_success() { [ "$status" -eq 0 ] || fail_with "expected success, got $status"; }
+assert_output_contains() { case "$output" in *"$1"*) return 0 ;; *) fail_with "expected output to contain: $1" ;; esac; }
+
+@test "e2e: the Claude installer builds a real image" {
+    run bash "$REPO_ROOT/install/claude.sh" --no-path-edit
+    assert_success
+    docker image inspect "$CLAUDE_IMAGE" >/dev/null
+    [ -f "$HOME/claude-sandbox/Dockerfile" ]
+    [ -x "$HOME/.local/bin/claude-sandbox" ]
+}
+
+@test "e2e: the image's agent user has the host UID — the bug this repo kept hitting" {
+    run docker run --rm "$CLAUDE_IMAGE" id -u
+    assert_success
+    [ "$output" = "$(id -u)" ]
+    run docker run --rm "$CLAUDE_IMAGE" id -g
+    [ "$output" = "$(id -g)" ]
+}
+
+@test "e2e: the freshness labels are on the image" {
+    run docker image inspect -f '{{index .Config.Labels "sandbox.agent_uid"}}' "$CLAUDE_IMAGE"
+    [ "$output" = "$(id -u)" ]
+    run docker image inspect -f '{{index .Config.Labels "sandbox.dockerfile_sha"}}' "$CLAUDE_IMAGE"
+    [ "$output" = "$(file_sha "$HOME/claude-sandbox/Dockerfile")" ]
+}
+
+@test "e2e: a bind-mounted workspace is writable from inside the container" {
+    mkdir -p "$BATS_TEST_TMPDIR/project"
+    run docker run --rm -v "$BATS_TEST_TMPDIR/project:/workspace" --cap-drop=ALL \
+        --security-opt=no-new-privileges "$CLAUDE_IMAGE" \
+        sh -c 'echo written-by-agent > /workspace/proof.txt'
+    assert_success
+    [ "$(cat "$BATS_TEST_TMPDIR/project/proof.txt")" = "written-by-agent" ]
+    [ -O "$BATS_TEST_TMPDIR/project/proof.txt" ]
+}
+
+@test "e2e: claude actually runs inside the image" {
+    run docker run --rm "$CLAUDE_IMAGE" claude --version
+    assert_success
+    assert_output_contains "."
+}
+
+@test "e2e: the everyday toolchains are present" {
+    run docker run --rm "$CLAUDE_IMAGE" sh -c 'git --version && python3 --version && cargo --version && rg --version && jq --version'
+    assert_success
+}
+
+@test "e2e: the volumes exist and are owned by the host user" {
+    docker volume inspect "claude-config-$E2E_USER" >/dev/null
+    docker volume inspect "claude-local-$E2E_USER" >/dev/null
+    run docker run --rm --user 0:0 -v "claude-config-$E2E_USER:/v" "$CLAUDE_IMAGE" stat -c %u /v
+    assert_success
+    [ "$output" = "$(id -u)" ]
+}
+
+@test "e2e: re-running the installer rebuilds nothing" {
+    run bash "$REPO_ROOT/install/claude.sh" --no-path-edit
+    assert_success
+    assert_output_contains "is up to date"
+}
+
+@test "e2e: --check reports a healthy install" {
+    PATH="$HOME/.local/bin:$PATH" run bash "$REPO_ROOT/install/claude.sh" --check --no-path-edit
+    assert_success
+    assert_output_contains "image               current"
+}
+
+@test "e2e: --sandbox-doctor agrees with reality" {
+    run "$HOME/.local/bin/claude-sandbox" --sandbox-doctor
+    assert_success
+    assert_output_contains "$CLAUDE_IMAGE"
+    assert_output_contains "image agent UID     $(id -u)"
+}
+
+@test "e2e: a shipped Dockerfile change triggers exactly one rebuild" {
+    # A real upgrade arrives as a *new installer* carrying a different embedded
+    # Dockerfile. Editing the installed copy instead is a hand-edit, which the
+    # installer is supposed to back up and overwrite — a different path, covered
+    # in the integration suite.
+    awk '{ print } /^ENV CLAUDE_CONFIG_DIR=/ { print "# e2e upgrade marker" }' \
+        "$REPO_ROOT/install/claude.sh" > "$BATS_TEST_TMPDIR/claude-v2.sh"
+    grep -q 'e2e upgrade marker' "$BATS_TEST_TMPDIR/claude-v2.sh" \
+        || fail_with "the v2 fixture did not change the embedded Dockerfile"
+
+    run bash "$BATS_TEST_TMPDIR/claude-v2.sh" --no-path-edit
+    assert_success
+    assert_output_contains "the Dockerfile changed"
+    grep -q 'e2e upgrade marker' "$HOME/claude-sandbox/Dockerfile"
+
+    # Every layer is a cache hit, but the labels are rewritten, so the next run
+    # must consider the image current again.
+    run bash "$BATS_TEST_TMPDIR/claude-v2.sh" --no-path-edit
+    assert_success
+    assert_output_contains "is up to date"
+}
+
+@test "e2e: a hand-edited Dockerfile is backed up and the shipped one restored" {
+    printf '\n# a local edit\n' >> "$HOME/claude-sandbox/Dockerfile"
+    run bash "$REPO_ROOT/install/claude.sh" --no-path-edit
+    assert_success
+    assert_output_contains "was modified locally"
+    grep -q 'a local edit' "$HOME"/claude-sandbox/Dockerfile.bak.*
+    ! grep -q 'a local edit' "$HOME/claude-sandbox/Dockerfile"
+}
+
+@test "e2e: a UID-mismatched volume is repaired without losing its contents" {
+    docker run --rm --user 0:0 -v "claude-config-$E2E_USER:/v" "$CLAUDE_IMAGE" \
+        sh -c 'echo secret-token > /v/auth.json && chown -R 0:0 /v'
+    run bash "$REPO_ROOT/install/claude.sh" --no-path-edit
+    assert_success
+    assert_output_contains "owned by UID 0"
+    run docker run --rm --user 0:0 -v "claude-config-$E2E_USER:/v" "$CLAUDE_IMAGE" cat /v/auth.json
+    [ "$output" = "secret-token" ]
+    run docker run --rm --user 0:0 -v "claude-config-$E2E_USER:/v" "$CLAUDE_IMAGE" stat -c %u /v/auth.json
+    [ "$output" = "$(id -u)" ]
+}
+
+@test "e2e: the Codex installer builds, seeds config.toml and pins a version" {
+    run bash "$REPO_ROOT/install/codex.sh" --no-path-edit
+    assert_success
+    docker image inspect "$CODEX_IMAGE" >/dev/null
+    [ -f "$HOME/codex-sandbox/config.toml" ]
+    run docker run --rm --user 0:0 -v "codex-config-$E2E_USER:/cfg" "$CODEX_IMAGE" cat /cfg/config.toml
+    assert_success
+    assert_output_contains 'approval_policy = "never"'
+}
+
+@test "e2e: codex runs inside its image and its volume is agent-owned" {
+    run docker run --rm "$CODEX_IMAGE" codex --version
+    assert_success
+    run docker run --rm --user 0:0 -v "codex-config-$E2E_USER:/cfg" "$CODEX_IMAGE" stat -c %u /cfg/config.toml
+    [ "$output" = "$(id -u)" ]
+}
+
+@test "e2e: uninstall removes the image but keeps the login volumes" {
+    run bash "$REPO_ROOT/install/codex.sh" --uninstall
+    assert_success
+    run docker image inspect "$CODEX_IMAGE"
+    [ "$status" -ne 0 ]
+    docker volume inspect "codex-config-$E2E_USER" >/dev/null
+}
+
+@test "e2e: uninstall --purge --yes finally removes the volumes" {
+    run bash "$REPO_ROOT/install/claude.sh" --no-path-edit
+    run bash "$REPO_ROOT/install/claude.sh" --uninstall --purge --yes
+    assert_success
+    run docker volume inspect "claude-config-$E2E_USER"
+    [ "$status" -ne 0 ]
+}

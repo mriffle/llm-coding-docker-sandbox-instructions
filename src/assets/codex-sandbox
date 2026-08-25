@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# codex-sandbox — run Codex CLI sandboxed in the current directory.
+#
+# Installed by the agent-sandbox installer (v@@VERSION@@):
+#   curl -fsSL @@RAW_BASE@@/install/codex.sh | bash
+# Edits here are backed up, not preserved, when you upgrade.
+#
+# Autonomy comes from ~/.codex/config.toml inside the container
+# (approval_policy = "never", sandbox_mode = "danger-full-access"),
+# not from a command-line flag.
+set -uo pipefail
+
+AGENT=codex
+AGENT_BIN=codex
+AGENT_NAME="Codex CLI"
+IMAGE_BASENAME=codex-sandbox
+LAUNCHER_NAME=codex-sandbox
+
+# @include assets/launcher-common.sh
+
+CONFIG_VOL="codex-config-$(sandbox_user)"
+VOLUMES=("$CONFIG_VOL")
+MOUNT_ARGS=(-v "$CONFIG_VOL:/home/agent/.codex")
+
+# Where the installer put the Dockerfile. Absolute, because this script runs
+# from arbitrary project directories.
+codex_src_dir() {
+    local manifest line
+    if [ -n "${CODEX_SANDBOX_SRC:-}" ]; then printf '%s' "$CODEX_SANDBOX_SRC"; return; fi
+    manifest="$(state_dir)/codex.manifest"
+    if [ -r "$manifest" ]; then
+        while IFS= read -r line || [ -n "$line" ]; do
+            case "$line" in src_dir=*) printf '%s' "${line#*=}"; return ;; esac
+        done < "$manifest"
+    fi
+    printf '%s/codex-sandbox' "$HOME"
+}
+
+# Codex has no self-updater, so the launcher is where updates happen: ask the
+# npm registry, and rebuild only when the version actually changed (tracked by
+# an image label, so an up-to-date launch does no work at all). The other
+# labels are re-applied so the installer's own freshness check stays accurate.
+pre_run_hook() {
+    local latest current src dockerfile_sha
+    have curl || return 0
+    latest=$(curl -fsSL --max-time 5 https://registry.npmjs.org/@openai/codex/latest 2>/dev/null \
+        | { jq -r .version 2>/dev/null || grep -o '"version":"[^"]*"' | head -1 | cut -d'"' -f4; })
+    latest=$(printf '%s' "$latest" | tr -d ' \r\n')
+
+    if [ -z "$latest" ] || [ "$latest" = "null" ]; then
+        lwarn "npm version check failed; running the existing image"
+        return 0
+    fi
+    current=$(docker image inspect -f '{{index .Config.Labels "codex_version"}}' "$IMAGE" 2>/dev/null)
+    [ "$latest" != "$current" ] || return 0
+
+    src=$(codex_src_dir)
+    if [ ! -f "$src/Dockerfile" ]; then
+        lwarn "Codex $latest is available but no Dockerfile at $src"
+        lwarn "(set CODEX_SANDBOX_SRC, or re-run the installer); running the existing image"
+        return 0
+    fi
+
+    printf 'sandbox: Codex %s available (have: %s); rebuilding — this can take a minute...\n' \
+        "$latest" "${current:-none}" >&2
+    if have sha256sum; then dockerfile_sha=$(sha256sum "$src/Dockerfile" | cut -d' ' -f1)
+    elif have shasum; then dockerfile_sha=$(shasum -a 256 "$src/Dockerfile" | cut -d' ' -f1)
+    else dockerfile_sha=unknown
+    fi
+
+    if docker build -q \
+        --build-arg "CODEX_VERSION=$latest" \
+        --build-arg "UID=$(id -u)" --build-arg "GID=$(id -g)" \
+        --label "codex_version=$latest" \
+        --label "sandbox.dockerfile_sha=$dockerfile_sha" \
+        --label "sandbox.agent_uid=$(id -u)" \
+        --label "sandbox.installer_version=$SANDBOX_VERSION" \
+        -t "$IMAGE" "$src" >/dev/null; then
+        printf 'sandbox: now on Codex %s\n' "$latest" >&2
+    else
+        lwarn "rebuild failed; running the existing image"
+    fi
+}
+
+launcher_main "$@"

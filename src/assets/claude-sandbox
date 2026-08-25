@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# claude-sandbox — run Claude Code sandboxed in the current directory.
+#
+# Installed by the agent-sandbox installer (v@@VERSION@@):
+#   curl -fsSL @@RAW_BASE@@/install/claude.sh | bash
+# Edits here are backed up, not preserved, when you upgrade.
+#
+# The only host path the container can see is $PWD. Auth and the
+# self-updated claude binary live in per-user named volumes, so they
+# survive every rebuild.
+set -uo pipefail
+
+AGENT=claude
+AGENT_BIN=claude
+AGENT_NAME="Claude Code"
+IMAGE_BASENAME=claude-sandbox
+LAUNCHER_NAME=claude-sandbox
+
+# @include assets/launcher-common.sh
+
+CONFIG_VOL="claude-config-$(sandbox_user)"
+LOCAL_VOL="claude-local-$(sandbox_user)"
+VOLUMES=("$CONFIG_VOL" "$LOCAL_VOL")
+MOUNT_ARGS=(
+    -v "$CONFIG_VOL:/home/agent/.claude"
+    -v "$LOCAL_VOL:/home/agent/.local"
+)
+
+launcher_main "$@"

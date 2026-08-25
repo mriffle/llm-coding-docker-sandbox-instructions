@@ -1,0 +1,203 @@
+#!/usr/bin/env bash
+#
+# A scriptable stand-in for docker, so the installers can be exercised end to
+# end on a machine with no daemon (and so failure modes that are awkward to
+# stage for real — a dead daemon, a permission-denied socket, a volume owned
+# by the wrong UID — become one-line test setup).
+#
+# Driven by:
+#   FAKE_DOCKER_LOG          file that every invocation is appended to
+#   FAKE_DOCKER_STATE        directory holding fake images/volumes
+#   FAKE_DOCKER_INFO_RC      exit code for `docker info`        (default 0)
+#   FAKE_DOCKER_INFO_OUT     stderr text when info fails
+#   FAKE_DOCKER_BUILD_RC     exit code for `docker build`       (default 0)
+#   FAKE_DOCKER_BUILD_OUT    extra text emitted during a build
+#   FAKE_DOCKER_NEW_VOL_UID  owner recorded for newly created volumes
+set -u
+
+S="${FAKE_DOCKER_STATE:?FAKE_DOCKER_STATE must be set}"
+mkdir -p "$S/images" "$S/volumes"
+
+if [ -n "${FAKE_DOCKER_LOG:-}" ]; then
+    printf 'docker %s\n' "$*" >> "$FAKE_DOCKER_LOG"
+fi
+# One argument per line, so tests can assert on arguments containing spaces.
+if [ -n "${FAKE_DOCKER_ARGV:-}" ]; then
+    printf -- '--- invocation ---\n' >> "$FAKE_DOCKER_ARGV"
+    for _a in "$@"; do printf '%s\n' "$_a" >> "$FAKE_DOCKER_ARGV"; done
+fi
+
+img_file()  { printf '%s/images/%s.labels' "$S" "$(printf '%s' "$1" | tr '/:' '__')"; }
+vol_owner() { printf '%s/volumes/%s.owner' "$S" "$1"; }
+vol_files() { printf '%s/volumes/%s.files' "$S" "$1"; }
+
+label_of() {
+    local file=$1 key=$2 line
+    [ -f "$file" ] || return 1
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in "$key="*) printf '%s' "${line#*=}"; return 0 ;; esac
+    done < "$file"
+    printf ''
+}
+
+cmd=${1:-}; shift || true
+
+case "$cmd" in
+info)
+    rc=${FAKE_DOCKER_INFO_RC:-0}
+    if [ "$rc" -ne 0 ]; then
+        printf '%s\n' "${FAKE_DOCKER_INFO_OUT:-Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?}" >&2
+        exit "$rc"
+    fi
+    # `docker info -f '{{.OSType}}'` and friends
+    if [ "${1:-}" = "-f" ] || [ "${1:-}" = "--format" ]; then
+        case "${2:-}" in
+            *OSType*) printf '%s\n' "${FAKE_DOCKER_OSTYPE:-linux}" ;;
+            *DockerRootDir*) printf '%s\n' "$S/root" ;;
+            *) printf '\n' ;;
+        esac
+        exit 0
+    fi
+    printf 'Server Version: 99.0.0-fake\n'
+    exit 0
+    ;;
+
+version)
+    if [ "${1:-}" = "-f" ] || [ "${1:-}" = "--format" ]; then printf '99.0.0-fake\n'; else printf 'fake docker\n'; fi
+    exit 0
+    ;;
+
+image)
+    sub=${1:-}; shift || true
+    case "$sub" in
+    inspect)
+        fmt=''
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                -f|--format) shift; fmt=${1:-} ;;
+                *) target=$1 ;;
+            esac
+            shift
+        done
+        f=$(img_file "${target:-}")
+        [ -f "$f" ] || { printf 'Error: No such image: %s\n' "${target:-}" >&2; exit 1; }
+        if [ -n "$fmt" ]; then
+            key=$(printf '%s' "$fmt" | sed -n 's/.*Labels "\([^"]*\)".*/\1/p')
+            [ -n "$key" ] && label_of "$f" "$key" || printf ''
+            printf '\n'
+        else
+            printf '[{"fake":true}]\n'
+        fi
+        exit 0
+        ;;
+    rm)
+        f=$(img_file "${1:-}")
+        [ -f "$f" ] || { printf 'Error: No such image\n' >&2; exit 1; }
+        rm -f "$f"; exit 0
+        ;;
+    esac
+    exit 0
+    ;;
+
+volume)
+    sub=${1:-}; shift || true
+    case "$sub" in
+    create)
+        vol=${1:-}
+        if [ ! -f "$(vol_owner "$vol")" ]; then
+            printf '%s' "${FAKE_DOCKER_NEW_VOL_UID:-$(id -u)}" > "$(vol_owner "$vol")"
+            : > "$(vol_files "$vol")"
+        fi
+        printf '%s\n' "$vol"; exit 0 ;;
+    inspect)
+        [ -f "$(vol_owner "${1:-}")" ] || { printf 'Error: No such volume: %s\n' "${1:-}" >&2; exit 1; }
+        printf '[{"Name":"%s"}]\n' "$1"; exit 0 ;;
+    rm)
+        [ -f "$(vol_owner "${1:-}")" ] || { printf 'Error: No such volume\n' >&2; exit 1; }
+        rm -f "$(vol_owner "$1")" "$(vol_files "$1")"; exit 0 ;;
+    ls)
+        find "$S/volumes" -name '*.owner' 2>/dev/null | sed -e 's|.*/||' -e 's/\.owner$//' | sort -u; exit 0 ;;
+    esac
+    exit 0
+    ;;
+
+build)
+    tag=''; ctx=''
+    labels=''
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -t|--tag)   shift; tag=${1:-} ;;
+            --label)    shift; labels="$labels${1:-}
+" ;;
+            --build-arg) shift ;;
+            -q|--quiet) ;;
+            -*)         ;;
+            *)          ctx=$1 ;;
+        esac
+        shift
+    done
+    printf 'fake build: context=%s tag=%s\n' "$ctx" "$tag"
+    [ -z "${FAKE_DOCKER_BUILD_OUT:-}" ] || printf '%s\n' "$FAKE_DOCKER_BUILD_OUT"
+    rc=${FAKE_DOCKER_BUILD_RC:-0}
+    if [ "$rc" -ne 0 ]; then
+        printf 'fake build: failing on purpose (rc=%s)\n' "$rc" >&2
+        exit "$rc"
+    fi
+    if [ -z "$ctx" ] || [ ! -f "$ctx/Dockerfile" ]; then
+        printf 'fake build: no Dockerfile in %s\n' "$ctx" >&2; exit 1
+    fi
+    printf '%s' "$labels" > "$(img_file "$tag")"
+    exit 0
+    ;;
+
+run)
+    # Only the shapes the installers actually use: inspecting or repairing a
+    # volume's ownership, and seeding Codex's config.toml.
+    mounted=''; want_uid=''; rest=''
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -v|--volume)
+                shift
+                case "${1:-}" in
+                    /*|./*|~*) : ;;                      # host path bind mount
+                    *:*) mounted=${1%%:*} ;;             # named volume
+                esac ;;
+            -e|--env)
+                shift
+                case "${1:-}" in WANT_UID=*) want_uid=${1#WANT_UID=} ;; esac ;;
+            --rm|-it|-i|-t) ;;
+            --user) shift ;;
+            --entrypoint) shift; rest="$rest --entrypoint" ;;
+            --name) shift ;;
+            --cap-drop=*|--security-opt=*) ;;
+            *) rest="$rest $1" ;;
+        esac
+        shift
+    done
+
+    case "$rest" in
+        *entrypoint*)
+            printf '%s\n' "${FAKE_DOCKER_IMAGE_UID:-1001}"; exit 0 ;;
+        *stat*)
+            [ -n "$mounted" ] && cat "$(vol_owner "$mounted")" 2>/dev/null
+            printf '\n'; exit 0 ;;
+        *"test -f"*)
+            file=$(printf '%s' "$rest" | tr ' ' '\n' | grep -v '^$' | tail -1)
+            grep -qF "$(basename "$file")" "$(vol_files "$mounted")" 2>/dev/null
+            exit $? ;;
+        *cp\ *)
+            if [ -n "$mounted" ]; then
+                grep -q '^config.toml$' "$(vol_files "$mounted")" 2>/dev/null \
+                    || printf 'config.toml\n' >> "$(vol_files "$mounted")"
+            fi ;;
+    esac
+    case "$rest" in
+        *chown*)
+            uid=$(printf '%s' "$rest" | tr ' ' '\n' | grep -E '^[0-9]+:[0-9]+$' | head -1 | cut -d: -f1)
+            [ -n "$uid" ] || uid=$want_uid
+            [ -n "$uid" ] && [ -n "$mounted" ] && printf '%s' "$uid" > "$(vol_owner "$mounted")" ;;
+    esac
+    exit 0
+    ;;
+esac
+exit 0

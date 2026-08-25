@@ -1,0 +1,358 @@
+#!/usr/bin/env bats
+# The generated PowerShell installers and launchers, driven under pwsh with
+# the same fake docker the shell suite uses. Runs on Linux and on Windows.
+
+load '../helper'
+
+setup() {
+    common_setup
+    if [ -x "$REPO_ROOT/.bin/pwsh" ]; then PWSH="$REPO_ROOT/.bin/pwsh"
+    elif command -v pwsh >/dev/null 2>&1; then PWSH=pwsh
+    else skip "pwsh not available (run tools/fetch-tools.sh --with-pwsh)"; fi
+
+    export SANDBOX_FAKE_PLATFORM=windows
+    export SANDBOX_FAKE_HOME="$HOME"
+    export SANDBOX_FAKE_USER=testuser
+    export SANDBOX_STATE_DIR="$HOME/state"
+    export SANDBOX_FAKE_USERPATH_FILE="$TESTDIR/userpath"
+    export SANDBOX_FAKE_UPSTREAM=fail
+    export SANDBOX_FAKE_NPM=1.2.3
+    export FAKE_DOCKER_ARGV="$TESTDIR/docker.argv"
+    : > "$FAKE_DOCKER_ARGV"
+    DF="$HOME/claude-sandbox/Dockerfile"
+    LAUNCHER="$HOME/bin/claude-sandbox.ps1"
+    SHIM="$HOME/bin/claude-sandbox.cmd"
+    MANIFEST="$HOME/state/claude.manifest"
+}
+teardown() { common_teardown; }
+
+ps_install() {
+    local agent=$1; shift
+    run "$PWSH" -NoProfile -File "$REPO_ROOT/install/$agent.ps1" "$@"
+}
+
+# --- preflight -------------------------------------------------------------
+
+@test "ps: refuses to run on a non-Windows host and points at the shell script" {
+    SANDBOX_FAKE_PLATFORM=linux ps_install claude
+    assert_status 78
+    assert_output_contains 'for native Windows'
+    assert_output_contains 'install/claude.sh | bash'
+}
+
+@test "ps: missing WSL gives the elevated wsl --install instruction" {
+    PATH="$(path_without wsl.exe)" ps_install claude
+    assert_status 12
+    assert_output_contains 'WSL2 is not installed'
+    assert_output_contains 'wsl --install'
+    assert_output_contains 'PowerShell as Administrator'
+}
+
+@test "ps: WSL1-only distributions are named and the upgrade command given" {
+    FAKE_WSL_MODE=v1 ps_install claude
+    assert_status 12
+    assert_output_contains 'still on WSL1'
+    assert_output_contains 'wsl --set-version'
+}
+
+@test "ps: missing Docker Desktop gives the winget command and the licensing note" {
+    PATH="$(path_without docker)" ps_install claude
+    assert_status 10
+    assert_output_contains 'winget install -e --id Docker.DockerDesktop'
+    assert_output_contains 'paid subscription'
+}
+
+@test "ps: an unreachable daemon is reported as such" {
+    FAKE_DOCKER_INFO_RC=1 ps_install claude
+    assert_status 11
+    assert_output_contains 'not responding'
+    assert_output_contains 'Start Docker Desktop'
+}
+
+@test "ps: Windows-container mode is diagnosed precisely and changes nothing" {
+    # Mirrors the assertion the windows-latest CI job makes on a real runner,
+    # where Docker genuinely is in Windows-container mode.
+    FAKE_DOCKER_OSTYPE=windows ps_install claude -NoBuild
+    assert_status 11
+    assert_output_contains 'Windows-container mode'
+    assert_output_contains 'Switch to Linux containers'
+    # It must refuse before writing anything at all.
+    assert_file_missing "$DF"
+    assert_file_missing "$LAUNCHER"
+    assert_file_missing "$SHIM"
+    assert_file_missing "$MANIFEST"
+    refute_docker_ran 'docker build'
+}
+
+@test "ps: codex also refuses in Windows-container mode" {
+    FAKE_DOCKER_OSTYPE=windows ps_install codex -NoBuild
+    assert_status 11
+    assert_output_contains 'Switch to Linux containers'
+    assert_file_missing "$HOME/codex-sandbox/Dockerfile"
+}
+
+# --- install ---------------------------------------------------------------
+
+@test "ps: fresh install writes the Dockerfile, launcher and cmd shim" {
+    ps_install claude
+    assert_success
+    assert_file_exists "$DF"
+    assert_file_exists "$LAUNCHER"
+    assert_file_exists "$SHIM"
+    assert_file_exists "$MANIFEST"
+    assert_file_contains "$DF" 'FROM node:24-slim'
+    assert_file_contains "$SHIM" 'ExecutionPolicy Bypass'
+}
+
+@test "ps: the Dockerfile is written with LF endings and no BOM" {
+    ps_install claude
+    assert_success
+    run bash -c "head -c 3 '$DF' | od -An -tx1 | tr -d ' '"
+    [ "$output" != "efbbbf" ]
+    refute_file_contains "$DF" $'\r'
+}
+
+@test "ps: no UID build args on this route, but the freshness labels are set" {
+    ps_install claude
+    assert_success
+    assert_docker_ran '-t claude-sandbox-testuser'
+    assert_docker_ran 'sandbox.dockerfile_sha='
+    refute_docker_ran '--build-arg UID='
+}
+
+@test "ps: both volumes are created, namespaced per user" {
+    ps_install claude
+    assert_docker_ran 'volume create claude-config-testuser'
+    assert_docker_ran 'volume create claude-local-testuser'
+}
+
+@test "ps: the bin directory is added to the user PATH exactly once" {
+    ps_install claude
+    assert_success
+    assert_file_contains "$SANDBOX_FAKE_USERPATH_FILE" "$HOME/bin"
+    ps_install claude
+    [ "$(tr ';' '\n' < "$SANDBOX_FAKE_USERPATH_FILE" | grep -c "^$HOME/bin$")" -eq 1 ]
+}
+
+@test "ps: re-running changes nothing and does not rebuild" {
+    ps_install claude
+    : > "$FAKE_DOCKER_LOG"
+    ps_install claude
+    assert_success
+    assert_output_contains 'is already current'
+    assert_output_contains 'is up to date'
+    refute_docker_ran 'docker build'
+}
+
+@test "ps: upgrade rewrites the Dockerfile and rebuilds" {
+    ps_install claude
+    sed -e "s/^\\\$script:InstallerVersion = '[^']*'/\$script:InstallerVersion = '9.9.9'/" \
+        -e 's/    jq ripgrep procps/    jq ripgrep procps fd-find/' \
+        "$REPO_ROOT/install/claude.ps1" > "$TESTDIR/v2.ps1"
+    grep -q 'fd-find' "$TESTDIR/v2.ps1"
+    : > "$FAKE_DOCKER_LOG"
+    run "$PWSH" -NoProfile -File "$TESTDIR/v2.ps1"
+    assert_success
+    assert_output_contains 'upgrading from v'
+    assert_file_contains "$DF" 'fd-find'
+    assert_docker_ran 'docker build'
+}
+
+@test "ps: a hand-edited Dockerfile is backed up rather than discarded" {
+    ps_install claude
+    printf 'FROM my-own-base\n' > "$DF"
+    sed -e 's/    jq ripgrep procps/    jq ripgrep procps fd-find/' \
+        "$REPO_ROOT/install/claude.ps1" > "$TESTDIR/v2.ps1"
+    run "$PWSH" -NoProfile -File "$TESTDIR/v2.ps1"
+    assert_success
+    assert_output_contains 'was modified locally'
+    [ -f "$HOME"/claude-sandbox/Dockerfile.bak.* ]
+}
+
+@test "ps: a failed build exits non-zero and records no install" {
+    FAKE_DOCKER_BUILD_RC=4 ps_install claude
+    assert_failure
+    assert_output_contains 'docker build failed'
+    assert_file_missing "$MANIFEST"
+}
+
+# --- check and uninstall ---------------------------------------------------
+
+@test "ps: -Check reports not installed, then reports everything current" {
+    ps_install claude -Check
+    assert_status 1
+    assert_output_contains 'not installed'
+    ps_install claude
+    ps_install claude -Check
+    assert_success
+    assert_output_contains 'Dockerfile          current'
+    assert_output_contains 'cmd shim            present'
+    assert_output_contains 'PATH                ok'
+}
+
+@test "ps: -Uninstall keeps the volumes, -Purge -Yes removes them" {
+    ps_install claude
+    ps_install claude -Uninstall
+    assert_success
+    assert_file_missing "$LAUNCHER"
+    assert_file_missing "$SHIM"
+    assert_file_missing "$MANIFEST"
+    refute_docker_ran 'volume rm'
+    ps_install claude
+    ps_install claude -Uninstall -Purge -Yes
+    assert_docker_ran 'volume rm claude-config-testuser'
+}
+
+@test "ps: -Help and -Version touch nothing" {
+    ps_install claude -Version
+    assert_success
+    assert_output_contains "$(cat "$REPO_ROOT/VERSION")"
+    ps_install claude -Help
+    assert_success
+    assert_output_contains 'scriptblock'
+    assert_file_missing "$DF"
+}
+
+@test "ps: -Prefix and -SrcDir are honoured" {
+    ps_install claude -Prefix "$TESTDIR/mybin" -SrcDir "$TESTDIR/mysrc"
+    assert_success
+    assert_file_exists "$TESTDIR/mybin/claude-sandbox.ps1"
+    assert_file_exists "$TESTDIR/mysrc/Dockerfile"
+    assert_file_missing "$DF"
+}
+
+# --- codex -----------------------------------------------------------------
+
+@test "ps: codex install seeds config.toml and normalises volume ownership" {
+    ps_install codex
+    assert_success
+    assert_file_exists "$HOME/codex-sandbox/config.toml"
+    assert_output_contains 'seeded config.toml'
+    assert_output_contains "owned by 1001"
+    assert_docker_ran '--user 0:0'
+    grep -q 'config.toml' "$FAKE_DOCKER_STATE/volumes/codex-config-testuser.files"
+}
+
+@test "ps: codex pins the npm version into the image" {
+    SANDBOX_FAKE_NPM=0.44.0 ps_install codex
+    assert_success
+    assert_output_contains 'pinning Codex 0.44.0'
+    assert_docker_ran '--build-arg CODEX_VERSION=0.44.0'
+}
+
+@test "ps: codex survives an unreachable npm registry" {
+    SANDBOX_FAKE_NPM=fail ps_install codex
+    assert_success
+    assert_output_contains 'could not reach the npm registry'
+    assert_file_exists "$HOME/state/codex.manifest"
+}
+
+@test "ps: a user-edited config.toml is kept" {
+    ps_install codex
+    printf 'approval_policy = "on-request"\n' > "$HOME/codex-sandbox/config.toml"
+    ps_install codex
+    assert_output_contains 'keeping your config.toml'
+    assert_file_contains "$HOME/codex-sandbox/config.toml" 'on-request'
+}
+
+# --- launcher --------------------------------------------------------------
+
+@test "ps launcher: mounts the current directory and the right volumes" {
+    ps_install claude
+    mkdir -p "$TESTDIR/proj"
+    cd "$TESTDIR/proj"
+    : > "$FAKE_DOCKER_ARGV"
+    run "$PWSH" -NoProfile -File "$LAUNCHER" --dangerously-skip-permissions
+    assert_success
+    grep -qxF -- "$TESTDIR/proj:/workspace" "$FAKE_DOCKER_ARGV"
+    grep -qxF -- "claude-config-testuser:/home/agent/.claude" "$FAKE_DOCKER_ARGV"
+    grep -qxF -- "--dangerously-skip-permissions" "$FAKE_DOCKER_ARGV"
+    grep -qxF -- "--cap-drop=ALL" "$FAKE_DOCKER_ARGV"
+}
+
+@test "ps launcher: --sandbox-version and --sandbox-help start no container" {
+    ps_install claude
+    : > "$FAKE_DOCKER_LOG"
+    run "$PWSH" -NoProfile -File "$LAUNCHER" --sandbox-version
+    assert_success
+    assert_output_contains "$(cat "$REPO_ROOT/VERSION")"
+    run "$PWSH" -NoProfile -File "$LAUNCHER" --sandbox-help
+    assert_success
+    assert_output_contains 'no --sandbox-tmux on native Windows'
+    refute_docker_ran 'docker run'
+}
+
+@test "ps launcher: --sandbox-doctor reports image and volumes" {
+    ps_install claude
+    run "$PWSH" -NoProfile -File "$LAUNCHER" --sandbox-doctor
+    assert_success
+    assert_output_contains 'claude-sandbox-testuser'
+    assert_output_contains 'volume claude-config-testuser ok'
+}
+
+@test "ps launcher: a missing image tells you to run the installer" {
+    ps_install claude
+    rm -f "$FAKE_DOCKER_STATE/images/claude-sandbox-testuser.labels"
+    run "$PWSH" -NoProfile -File "$LAUNCHER"
+    assert_failure
+    assert_output_contains 'does not exist'
+    assert_output_contains 'install/claude.ps1 | iex'
+}
+
+@test "ps launcher: a newer upstream version produces a nudge" {
+    ps_install claude
+    mkdir -p "$TESTDIR/proj"; cd "$TESTDIR/proj"
+    SANDBOX_NO_UPDATE_CHECK= SANDBOX_FAKE_UPSTREAM=99.0.0 run "$PWSH" -NoProfile -File "$LAUNCHER"
+    assert_success
+    assert_output_contains 'of the sandbox is available'
+}
+
+@test "ps launcher: the nudge is checked at most once a day" {
+    ps_install claude
+    mkdir -p "$TESTDIR/proj"; cd "$TESTDIR/proj"
+    SANDBOX_NO_UPDATE_CHECK= SANDBOX_FAKE_UPSTREAM=99.0.0 run "$PWSH" -NoProfile -File "$LAUNCHER"
+    assert_output_contains 'is available'
+    SANDBOX_NO_UPDATE_CHECK= SANDBOX_FAKE_UPSTREAM=99.0.0 run "$PWSH" -NoProfile -File "$LAUNCHER"
+    refute_output_contains 'is available'
+}
+
+@test "ps launcher: codex rebuilds only when npm reports a new version" {
+    SANDBOX_FAKE_NPM=1.2.3 ps_install codex
+    mkdir -p "$TESTDIR/proj"; cd "$TESTDIR/proj"
+    : > "$FAKE_DOCKER_LOG"
+    SANDBOX_FAKE_NPM=1.2.3 run "$PWSH" -NoProfile -File "$HOME/bin/codex-sandbox.ps1"
+    assert_success
+    refute_docker_ran 'docker build'
+    : > "$FAKE_DOCKER_LOG"
+    SANDBOX_FAKE_NPM=9.9.9 run "$PWSH" -NoProfile -File "$HOME/bin/codex-sandbox.ps1"
+    assert_success
+    assert_output_contains 'Codex 9.9.9 available'
+    assert_docker_ran '--build-arg CODEX_VERSION=9.9.9'
+}
+
+@test "ps: re-running the codex installer picks up a new Codex release" {
+    SANDBOX_FAKE_NPM=0.44.0 ps_install codex
+    assert_success
+    : > "$FAKE_DOCKER_LOG"
+    SANDBOX_FAKE_NPM=0.45.0 ps_install codex
+    assert_success
+    assert_output_contains 'Codex 0.44.0 -> 0.45.0'
+    assert_docker_ran '--build-arg CODEX_VERSION=0.45.0'
+}
+
+@test "ps: re-running with the same Codex release rebuilds nothing" {
+    SANDBOX_FAKE_NPM=0.44.0 ps_install codex
+    : > "$FAKE_DOCKER_LOG"
+    SANDBOX_FAKE_NPM=0.44.0 ps_install codex
+    assert_success
+    refute_docker_ran 'docker build'
+}
+
+@test "ps: first-run instructions appear on a first run and not on a re-run" {
+    ps_install claude
+    assert_output_contains 'Log in once'
+    ps_install claude
+    assert_success
+    refute_output_contains 'Log in once'
+    assert_output_contains '--sandbox-doctor'
+}

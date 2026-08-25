@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# Stand-in for tmux. Records what the launcher asked for, and keeps just
+# enough session state to exercise the "same project / different project /
+# already attached" branches.
+#   FAKE_TMUX_STATE  directory holding one file per session
+#   FAKE_TMUX_LOG    file that every invocation is appended to
+set -u
+S="${FAKE_TMUX_STATE:?FAKE_TMUX_STATE must be set}"
+mkdir -p "$S/sessions"
+[ -z "${FAKE_TMUX_LOG:-}" ] || printf 'tmux %s\n' "$*" >> "$FAKE_TMUX_LOG"
+
+target() { printf '%s' "${1#=}"; }
+
+cmd=${1:-}; shift || true
+case "$cmd" in
+has-session)
+    name=''
+    while [ $# -gt 0 ]; do case "$1" in -t) shift; name=$(target "${1:-}") ;; esac; shift; done
+    [ -f "$S/sessions/$name" ]; exit $? ;;
+show-environment)
+    name=''; key=''
+    while [ $# -gt 0 ]; do
+        case "$1" in -t) shift; name=$(target "${1:-}") ;; *) key=$1 ;; esac; shift
+    done
+    [ -f "$S/sessions/$name" ] || exit 1
+    val=$(cat "$S/sessions/$name")
+    [ -n "$val" ] || exit 1
+    printf '%s=%s\n' "$key" "$val" ;;
+new-session)
+    name=''
+    while [ $# -gt 0 ]; do
+        case "$1" in -s) shift; name=${1:-} ;; -c) shift ;; -d) ;; esac
+        shift
+    done
+    : > "$S/sessions/$name" ;;
+set-environment)
+    name=''; val=''
+    while [ $# -gt 0 ]; do
+        case "$1" in -t) shift; name=$(target "${1:-}") ;; SANDBOX_PWD) shift; val=${1:-} ;; esac
+        shift
+    done
+    [ -n "$name" ] && printf '%s' "$val" > "$S/sessions/$name" ;;
+attach-session|attach)
+    exit 0 ;;
+esac
+exit 0

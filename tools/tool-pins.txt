@@ -1,0 +1,7 @@
+# sha256 pins for the vendored test toolchain (tools/fetch-tools.sh).
+# A download whose hash is missing here is reported; one that disagrees is fatal.
+6c881ab0698e4e6ea235245f22832860544f17ba386442fe7e9d629f8cbedf87  shellcheck-v0.10.0.linux.x86_64.tar.xz
+aeff09fdc8b0c88b3087c99de00cf549356d7a2f6a69e3fcec5e0e861d2f9063  bats-core-1.11.0.tar.gz
+6f6015203c47806c5cc444c19d8ed019695e610fbd948154264bf9ca8e157561  powershell-7.4.6-linux-x64.tar.gz
+bbd2f14826328eee7679da7221f2bc3afb011f6a928b848c80c321f6046ddf81  shellcheck-v0.10.0.darwin.aarch64.tar.xz
+ef27684f23279d112d8ad84e0823642e43f838993bbb8c0963db9b58a90464c2  shellcheck-v0.10.0.darwin.x86_64.tar.xz

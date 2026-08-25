@@ -1,0 +1,4 @@
+# Vendored test tooling — fetched by tools/fetch-tools.sh, never committed.
+# (Same convention this repo recommends to its own users for per-project toolchains.)
+.bin/
+.tmp/

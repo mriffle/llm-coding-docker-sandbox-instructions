@@ -1,0 +1,95 @@
+#!/usr/bin/env bats
+# Documentation is part of the deliverable: these check that what the README
+# promises is what the shipped scripts actually do.
+
+load '../helper'
+
+setup() { common_setup; }
+teardown() { common_teardown; }
+
+RAW_BASE="https://raw.githubusercontent.com/mriffle/llm-coding-docker-sandbox-instructions/main"
+
+@test "the version in VERSION is stamped into all four installers" {
+    local v
+    v=$(tr -d ' \n' < "$REPO_ROOT/VERSION")
+    grep -q "INSTALLER_VERSION=\"$v\"" "$REPO_ROOT/install/claude.sh"
+    grep -q "INSTALLER_VERSION=\"$v\"" "$REPO_ROOT/install/codex.sh"
+    grep -q "InstallerVersion = '$v'" "$REPO_ROOT/install/claude.ps1"
+    grep -q "InstallerVersion = '$v'" "$REPO_ROOT/install/codex.ps1"
+}
+
+@test "the version is stamped into the embedded launchers too" {
+    local v
+    v=$(tr -d ' \n' < "$REPO_ROOT/VERSION")
+    grep -q "SANDBOX_VERSION=\"$v\"" "$REPO_ROOT/install/claude.sh"
+    grep -q "SandboxVersion = '$v'" "$REPO_ROOT/install/claude.ps1"
+}
+
+@test "every install URL in the docs points at a file that exists" {
+    local url path
+    grep -oh "$RAW_BASE/install/[a-z]*\.\(sh\|ps1\)" \
+        "$REPO_ROOT/README.md" "$REPO_ROOT/WINDOWS.md" "$REPO_ROOT/MANUAL.md" \
+        | sort -u | while read -r url; do
+            path="$REPO_ROOT/${url#"$RAW_BASE"/}"
+            [ -f "$path" ] || fail_with "docs reference a missing file: $url"
+        done
+}
+
+@test "the docs' raw base matches the one compiled into the installers" {
+    grep -q "RAW_BASE=\"$RAW_BASE\"" "$REPO_ROOT/install/claude.sh"
+    grep -q "RawBase          = '$RAW_BASE'" "$REPO_ROOT/install/claude.ps1"
+}
+
+@test "every --sandbox-* flag the README documents is handled by the launcher" {
+    local flag
+    for flag in $(grep -oh -- '--sandbox-[a-z-]*' "$REPO_ROOT/README.md" | sort -u); do
+        grep -qE -- "[[:space:]]$flag[|)]" "$REPO_ROOT/install/claude.sh" \
+            || fail_with "README documents $flag but the launcher does not handle it"
+    done
+}
+
+@test "every installer flag the README documents is accepted" {
+    run_install claude --check
+    local flag
+    for flag in --check --force --uninstall --purge --no-build --no-path-edit --yes --quiet --help; do
+        grep -qE -- "[[:space:]]$flag[|)]" "$REPO_ROOT/install/claude.sh" \
+            || fail_with "README documents $flag but parse_args does not accept it"
+    done
+    for flag in --prefix --src-dir; do
+        grep -qE -- "[[:space:]]$flag[|)=]" "$REPO_ROOT/install/claude.sh" \
+            || fail_with "README documents $flag but parse_args does not accept it"
+    done
+}
+
+@test "every -Flag the README documents is a real PowerShell parameter" {
+    local flag
+    for flag in Check Force Uninstall Purge Prefix; do
+        grep -q "\[switch\]\$$flag\|\[string\]\$$flag" "$REPO_ROOT/install/claude.ps1" \
+            || fail_with "README documents -$flag but claude.ps1 has no such parameter"
+    done
+}
+
+@test "the persistence table names the volumes the installers actually create" {
+    local vol
+    for vol in claude-config claude-local codex-config; do
+        grep -qF "$vol" "$REPO_ROOT/README.md" || fail_with "README omits the $vol volume"
+    done
+    grep -q 'VOLUME_BASENAMES="claude-config claude-local"' "$REPO_ROOT/install/claude.sh"
+    grep -q 'VOLUME_BASENAMES="codex-config"' "$REPO_ROOT/install/codex.sh"
+}
+
+@test "MANUAL.md still carries the hand-build path it is there to document" {
+    grep -q 'FROM node:24-slim' "$REPO_ROOT/MANUAL.md"
+    grep -q 'docker build --build-arg UID' "$REPO_ROOT/MANUAL.md"
+    grep -q 'approval_policy = "never"' "$REPO_ROOT/MANUAL.md"
+}
+
+@test "the Dockerfiles the installers embed match the ones MANUAL.md documents" {
+    # Not byte-identical (the shipped ones carry a managed-by header), but the
+    # build instructions themselves must not drift apart.
+    local line
+    while IFS= read -r line; do
+        grep -qF "$line" "$REPO_ROOT/MANUAL.md" \
+            || fail_with "MANUAL.md is missing a Dockerfile line the installer ships: $line"
+    done < <(grep -E '^(FROM|RUN|ENV|ARG|USER|WORKDIR) ' "$REPO_ROOT/src/assets/claude.Dockerfile")
+}
