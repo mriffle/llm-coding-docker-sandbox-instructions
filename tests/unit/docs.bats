@@ -93,3 +93,39 @@ RAW_BASE="https://raw.githubusercontent.com/mriffle/llm-coding-docker-sandbox-in
             || fail_with "MANUAL.md is missing a Dockerfile line the installer ships: $line"
     done < <(grep -E '^(FROM|RUN|ENV|ARG|USER|WORKDIR) ' "$REPO_ROOT/src/assets/claude.Dockerfile")
 }
+
+@test "CLAUDE.md documents the constraints that have actually broken the build" {
+    local f="$REPO_ROOT/CLAUDE.md"
+    assert_file_exists "$f"
+    # The generated-file rule is the one a contributor must not miss.
+    assert_file_contains "$f" 'install/` is generated'
+    assert_file_contains "$f" 'tools/build.sh'
+    # Each of these corresponds to a real failure this repo has already had.
+    assert_file_contains "$f" 'bash 3.2'
+    assert_file_contains "$f" 'here-document nested inside'
+    assert_file_contains "$f" 'must not assume Linux'
+    assert_file_contains "$f" 'jq'
+}
+
+@test "CLAUDE.md names the tools and tiers that actually exist" {
+    local f="$REPO_ROOT/CLAUDE.md" t
+    for t in tools/build.sh tools/test.sh tools/fetch-tools.sh tools/check-portability.sh; do
+        assert_file_contains "$f" "$t"
+        [ -x "$REPO_ROOT/$t" ] || fail_with "CLAUDE.md names $t but it is not executable"
+    done
+    # Every SANDBOX_FAKE_* seam it advertises must exist in the shipped code.
+    local seam
+    for seam in SANDBOX_FAKE_UID SANDBOX_FAKE_UNAME_S SANDBOX_OS_RELEASE SANDBOX_PROC_VERSION SANDBOX_FAKE_EUID; do
+        grep -qF "$seam" "$f" || fail_with "CLAUDE.md should mention the $seam seam"
+        grep -qF "$seam" "$REPO_ROOT/install/claude.sh" \
+            || fail_with "CLAUDE.md documents $seam but the installer has no such seam"
+    done
+}
+
+@test "CLAUDE.md's CI job names match the workflow" {
+    local job
+    for job in generated-files-are-fresh lint-and-test macos e2e windows-smoke; do
+        assert_file_contains "$REPO_ROOT/CLAUDE.md" "$job"
+        assert_file_contains "$REPO_ROOT/.github/workflows/test.yml" "$job"
+    done
+}

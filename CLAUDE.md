@@ -1,0 +1,107 @@
+# Working in this repository
+
+Docker sandboxes for running Claude Code and Codex CLI in full-autonomy mode,
+delivered as four `curl | bash` / `irm | iex` installers. `README.md` is the
+user-facing guide; this file is for anyone changing the code.
+
+## The one rule
+
+**`install/` is generated. Never edit it directly.**
+
+Edit `src/`, then rebuild. CI fails if the committed output does not match a
+fresh build.
+
+```bash
+tools/fetch-tools.sh --with-pwsh   # vendor shellcheck, bats, pwsh into ./.bin (no root)
+tools/build.sh                     # src/ -> install/
+tools/test.sh                      # build + lint + unit + intg (+ e2e when docker is up)
+```
+
+A piped script cannot `source` a sibling, so `tools/build.sh` inlines the
+shared library and embeds assets with two comment directives:
+
+- `# @include lib/common.sh` — splice a file in verbatim (recursive)
+- `# @embed assets/claude.Dockerfile AS ASSET_DOCKERFILE` — define a variable
+  holding the file's contents
+
+`@@VERSION@@`, `@@RAW_BASE@@` and `@@REPO_URL@@` are substituted everywhere.
+
+## Hard constraints
+
+These are not style preferences. Each one has already broken the build.
+
+- **bash 3.2.** macOS still ships it as `/bin/bash`. No associative arrays, no
+  `${v,,}`, no `mapfile`, no `local -n`. Critically, **bash 3.2 cannot parse a
+  here-document nested inside `$( )`** — which is why assets are emitted as
+  `__asset_NAME() { cat <<EOF ... EOF }` and the substitution applied to the
+  function call. `tools/check-portability.sh` parses `install/*.sh` with the
+  real `bash:3.2` image whenever a docker daemon is reachable.
+- **BSD userland.** Feature-detect `sha256sum` vs `shasum`, `stat -c` vs
+  `stat -f`; no `sed -i`, no `readlink -f`. This applies to the tests too — the
+  macOS CI job runs them.
+- **No jq dependency.** The manifest is flat `key=value`, parsed in pure bash.
+  The launchers were careful to avoid jq; the installers must not reintroduce it.
+- **Truncation safety.** Everything before the final `main "$@"` must be
+  definitions only, so a cut-short download does nothing. Tested at six cut points.
+- **shellcheck clean at `--severity=style`**, including the generated files and
+  the launchers extracted from them.
+
+## Tests
+
+Four tiers, `tools/test.sh [build|lint|unit|intg|e2e]`:
+
+| Tier | What it drives |
+| --- | --- |
+| `unit` | `src/lib/common.sh` sourced directly |
+| `intg` | the built installers and launchers against a scripted fake `docker` |
+| `e2e` | real Docker — real images, real UIDs, real volumes |
+
+The fake `docker`, `curl`, `tmux` and `wsl.exe` live in `tests/fixtures/fakebin`.
+Production code carries deliberate test seams, all named `SANDBOX_FAKE_*`:
+`SANDBOX_FAKE_UID`, `SANDBOX_FAKE_UNAME_S`, `SANDBOX_OS_RELEASE`,
+`SANDBOX_PROC_VERSION`, `SANDBOX_FAKE_EUID`, and so on.
+
+**Tests must not assume Linux.** Do not invent a `PATH` from scratch (use
+`path_excluding` / `path_without` in `tests/helper.bash`); pin the platform with
+`SANDBOX_FAKE_UNAME_S=Linux` when asserting Linux-only output; and remember the
+shell launcher mounts bash's *logical* `$PWD` while the PowerShell one reports
+the *physical* path — they differ on macOS, where `/var` is a symlink.
+
+Sweep for hidden assumptions with:
+
+```bash
+SANDBOX_FAKE_UNAME_S=Darwin bats tests/unit tests/integration
+```
+
+## CI
+
+`.github/workflows/test.yml` runs on push to `main` and on pull requests:
+`generated-files-are-fresh`, `lint-and-test`, `macos` (bash 3.2 + BSD),
+`e2e` (real Docker), `windows-smoke` (real PowerShell). Every job is
+time-boxed, and `tools/test.sh` time-boxes each bats run, because a wedged
+test process otherwise hangs a job until the six-hour limit
+(`SANDBOX_TEST_TIMEOUT` overrides the default).
+
+Windows CI cannot do a full install: GitHub's Windows runners offer only
+Windows containers and WSL1, and these are Linux images. That job therefore
+asserts the installer *refuses* correctly, and the PowerShell behavioural suite
+runs under `pwsh` on the Linux runner.
+
+## Bugs worth not reintroducing
+
+- `useradd -u 1000` fails on `node:24-slim`: it already ships a `node` user at
+  UID/GID 1000, the first non-root UID on most Linux hosts. The Dockerfiles
+  rename the occupying identity instead of erroring.
+- `curl … | sh` exits 0 when curl fails, because sh reads empty input. Download
+  to a file and chain with `&&` so a failed download is fatal.
+- Hash embedded assets with `asset_sha`, not `sha256_string`: `atomic_write`
+  appends a newline that `$(cat <<EOF)` stripped, so the raw string never
+  matches the file and nothing ever compares as unchanged.
+
+## Docs
+
+`README.md` (installers, daily use), `MANUAL.md` (the hand-build reference),
+`WINDOWS.md` (WSL2 vs native). `tests/unit/docs.bats` checks they stay honest —
+documented flags exist, URLs resolve, versions are stamped, and MANUAL.md's
+Dockerfiles match the shipped ones. Update the docs in the same commit as the
+behaviour they describe.

@@ -178,7 +178,11 @@ tools/test.sh                      # build + lint + unit + integration (+ e2e if
 
 A single-file script can't `source` a sibling, so `tools/build.sh` inlines the shared library and embeds the Dockerfiles and launchers via two comment directives, `# @include` and `# @embed`. CI checks that the committed `install/` matches a fresh build.
 
-The suite runs in tiers: shellcheck and PSScriptAnalyzer plus a bash-3.2/BSD portability guard; unit tests of the shared library; integration tests that drive the built installers and launchers against a scripted fake `docker` (covering upgrades, hand-edited files, dead daemons, wrong UIDs, failed builds, truncated downloads); and an end-to-end tier that builds real images and checks real UIDs, mounts and volumes. See `tests/`.
+The suite runs in tiers: shellcheck and PSScriptAnalyzer plus a portability guard that parses the generated installers with a real `bash:3.2` image; unit tests of the shared library; integration tests that drive the built installers and launchers against a scripted fake `docker` (covering upgrades, hand-edited files, dead daemons, wrong UIDs, failed builds, truncated downloads); and an end-to-end tier that builds real images and checks real UIDs, mounts and volumes. See `tests/`.
+
+CI runs on every push to `main` and on pull requests: the freshness check above, lint plus unit and integration on Linux, the same suite on macOS under **bash 3.2** and BSD userland, real-Docker end-to-end, and a Windows job that exercises the PowerShell installers on a real Windows runner.
+
+`CLAUDE.md` has the constraints worth knowing before changing anything — chiefly that bash 3.2 cannot parse a here-document inside `$( )`, and that the tests must not assume a Linux host.
 
 ## References
 
