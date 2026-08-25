@@ -32,10 +32,16 @@ emit_embed_sh() {
     case "$body" in
         *"$BASH_EOF_TAG"*) die "asset for $name contains the heredoc delimiter $BASH_EOF_TAG" ;;
     esac
-    # shellcheck disable=SC2016  # emitting a literal command substitution
-    printf '%s=$(cat <<%s%s%s\n' "$name" "'" "$BASH_EOF_TAG" "'"
+    # The heredoc goes in a function body, NOT directly inside $( ). bash 3.2 —
+    # still /bin/bash on macOS — mis-parses a here-document nested in command
+    # substitution and dies on the first `;;` or `)` in the payload, which made
+    # the generated installers unrunnable there. Verified against bash:3.2.
+    printf '__asset_%s() {\n' "$name"
+    printf 'cat <<%s%s%s\n' "'" "$BASH_EOF_TAG" "'"
     printf '%s\n' "$body"
-    printf '%s\n)\n' "$BASH_EOF_TAG"
+    printf '%s\n}\n' "$BASH_EOF_TAG"
+    # shellcheck disable=SC2016  # emitting a literal command substitution
+    printf '%s=$(__asset_%s)\n' "$name" "$name"
 }
 
 emit_embed_ps() {

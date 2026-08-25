@@ -975,7 +975,8 @@ install_asset_if_absent() {
     ok "wrote $dest"
 }
 
-ASSET_DOCKERFILE=$(cat <<'__SANDBOX_ASSET_EOF__'
+__asset_ASSET_DOCKERFILE() {
+cat <<'__SANDBOX_ASSET_EOF__'
 # Codex CLI sandbox. Same philosophy as claude-sandbox.
 # NOTE: Codex has no auto-updater — version is baked at build time.
 # The launcher rebuilds when a new version ships.
@@ -1030,8 +1031,10 @@ RUN mkdir -p /home/agent/.codex /home/agent/.cargo
 
 ENV PATH=/home/agent/.npm-global/bin:/home/agent/.cargo/bin:/usr/local/cargo/bin:$PATH
 __SANDBOX_ASSET_EOF__
-)
-ASSET_LAUNCHER=$(cat <<'__SANDBOX_ASSET_EOF__'
+}
+ASSET_DOCKERFILE=$(__asset_ASSET_DOCKERFILE)
+__asset_ASSET_LAUNCHER() {
+cat <<'__SANDBOX_ASSET_EOF__'
 #!/usr/bin/env bash
 # codex-sandbox — run Codex CLI sandboxed in the current directory.
 #
@@ -1383,8 +1386,10 @@ pre_run_hook() {
 
 launcher_main "$@"
 __SANDBOX_ASSET_EOF__
-)
-ASSET_CONFIG_TOML=$(cat <<'__SANDBOX_ASSET_EOF__'
+}
+ASSET_LAUNCHER=$(__asset_ASSET_LAUNCHER)
+__asset_ASSET_CONFIG_TOML() {
+cat <<'__SANDBOX_ASSET_EOF__'
 # Codex autonomy inside the container. The container is the security
 # boundary, so Codex's own OS-level sandbox is turned off and approvals
 # are disabled. Seeded by the agent-sandbox installer (v1.0.0);
@@ -1392,7 +1397,8 @@ ASSET_CONFIG_TOML=$(cat <<'__SANDBOX_ASSET_EOF__'
 approval_policy = "never"
 sandbox_mode = "danger-full-access"
 __SANDBOX_ASSET_EOF__
-)
+}
+ASSET_CONFIG_TOML=$(__asset_ASSET_CONFIG_TOML)
 
 # Bake the current Codex release into the first build, so the very first
 # launch does not immediately rebuild. A registry that will not answer is not

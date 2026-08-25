@@ -121,6 +121,9 @@ jobs:
               if ($out -notmatch 'not installed') { throw "$agent -Check did not report 'not installed'" }
           }
           Write-Host 'windows smoke: ok'
+          # These steps run commands that exit non-zero on purpose; GitHub's
+          # pwsh shell fails the step on a stale $LASTEXITCODE otherwise.
+          exit 0
 
       - name: Preflight refuses correctly on a real Windows host
         shell: pwsh
@@ -150,6 +153,7 @@ jobs:
               }
           }
           Write-Host 'windows preflight: refused correctly, changed nothing'
+          exit 0
 
       - name: The cmd shim works on real Windows
         shell: pwsh
@@ -167,3 +171,4 @@ jobs:
           if ($out -notmatch 'shim-args:') { throw 'shim did not reach the PowerShell script' }
           if ($out -notmatch 'two words') { throw 'shim lost an argument containing a space' }
           Write-Host 'cmd shim: ok'
+          exit 0

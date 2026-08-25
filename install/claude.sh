@@ -975,7 +975,8 @@ install_asset_if_absent() {
     ok "wrote $dest"
 }
 
-ASSET_DOCKERFILE=$(cat <<'__SANDBOX_ASSET_EOF__'
+__asset_ASSET_DOCKERFILE() {
+cat <<'__SANDBOX_ASSET_EOF__'
 # Sandbox image for running Claude Code with --dangerously-skip-permissions.
 # Philosophy: sandbox skeleton plus everyday toolchains (C, Python, Rust).
 # Anything else a project needs gets installed into that project's own
@@ -1047,8 +1048,10 @@ RUN mkdir -p /home/agent/.claude /home/agent/.local/bin /home/agent/.local/share
 ENV PATH=/home/agent/.local/bin:/home/agent/.npm-global/bin:/home/agent/.cargo/bin:/usr/local/cargo/bin:$PATH
 ENV CLAUDE_CONFIG_DIR=/home/agent/.claude
 __SANDBOX_ASSET_EOF__
-)
-ASSET_LAUNCHER=$(cat <<'__SANDBOX_ASSET_EOF__'
+}
+ASSET_DOCKERFILE=$(__asset_ASSET_DOCKERFILE)
+__asset_ASSET_LAUNCHER() {
+cat <<'__SANDBOX_ASSET_EOF__'
 #!/usr/bin/env bash
 # claude-sandbox — run Claude Code sandboxed in the current directory.
 #
@@ -1344,7 +1347,8 @@ MOUNT_ARGS=(
 
 launcher_main "$@"
 __SANDBOX_ASSET_EOF__
-)
+}
+ASSET_LAUNCHER=$(__asset_ASSET_LAUNCHER)
 
 print_next_steps() {
     say ""

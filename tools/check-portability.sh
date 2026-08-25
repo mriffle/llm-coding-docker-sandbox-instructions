@@ -60,4 +60,22 @@ while IFS='|' read -r name pattern why; do
     fi
 done <<< "$CHECKS"
 
+# The grep rules above are heuristics. This is the real thing: parse the
+# generated installers with an actual bash 3.2, the version macOS still ships.
+# It is what caught `$(cat <<EOF ...)` — a here-document nested in command
+# substitution, which bash 3.2 mis-parses and which no pattern above would flag.
+if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+    for f in "$ROOT"/install/*.sh; do
+        rel=${f#"$ROOT"/}
+        if out=$(docker run --rm -v "$ROOT:/work:ro" bash:3.2 bash -n "/work/$rel" 2>&1); then
+            printf '  ok   %s parses under bash 3.2\n' "$rel"
+        else
+            printf '  FAIL %s does not parse under bash 3.2\n%s\n' "$rel" "$out"
+            rc=1
+        fi
+    done
+else
+    printf '  skip bash 3.2 parse check (needs a reachable docker daemon)\n'
+fi
+
 exit $rc

@@ -51,8 +51,10 @@ extract_launchers() {
     mkdir -p "$ROOT/.tmp/lint"
     local agent
     for agent in claude codex; do
-        sed -n "/^ASSET_LAUNCHER=\$(cat <<'__SANDBOX_ASSET_EOF__'\$/,/^__SANDBOX_ASSET_EOF__\$/p" \
-            "$ROOT/install/$agent.sh" | sed '1d;$d' > "$ROOT/.tmp/lint/$agent-sandbox"
+        # Assets are embedded as `__asset_NAME() { cat <<EOF ... EOF }` — a
+        # function body, because bash 3.2 cannot parse a heredoc inside $( ).
+        sed -n "/^__asset_ASSET_LAUNCHER() {\$/,/^__SANDBOX_ASSET_EOF__\$/p" \
+            "$ROOT/install/$agent.sh" | sed '1,2d;$d' > "$ROOT/.tmp/lint/$agent-sandbox"
         [ -s "$ROOT/.tmp/lint/$agent-sandbox" ] || return 1
     done
 }
