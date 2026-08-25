@@ -7,7 +7,7 @@ load '../helper'
 setup() {
     common_setup
     if [ -x "$REPO_ROOT/.bin/pwsh" ]; then PWSH="$REPO_ROOT/.bin/pwsh"
-    elif command -v pwsh >/dev/null 2>&1; then PWSH=pwsh
+    elif command -v pwsh >/dev/null 2>&1; then PWSH=$(command -v pwsh)
     else skip "pwsh not available (run tools/fetch-tools.sh --with-pwsh)"; fi
 
     export SANDBOX_FAKE_PLATFORM=windows
@@ -261,10 +261,13 @@ ps_install() {
     ps_install claude
     mkdir -p "$TESTDIR/proj"
     cd "$TESTDIR/proj"
+    # On macOS $TESTDIR is under /var, a symlink to /private/var, and
+    # PowerShell reports the resolved path — so resolve ours too.
+    local here; here=$(pwd -P)
     : > "$FAKE_DOCKER_ARGV"
     run "$PWSH" -NoProfile -File "$LAUNCHER" --dangerously-skip-permissions
     assert_success
-    grep -qxF -- "$TESTDIR/proj:/workspace" "$FAKE_DOCKER_ARGV"
+    grep -qxF -- "$here:/workspace" "$FAKE_DOCKER_ARGV"
     grep -qxF -- "claude-config-testuser:/home/agent/.claude" "$FAKE_DOCKER_ARGV"
     grep -qxF -- "--dangerously-skip-permissions" "$FAKE_DOCKER_ARGV"
     grep -qxF -- "--cap-drop=ALL" "$FAKE_DOCKER_ARGV"

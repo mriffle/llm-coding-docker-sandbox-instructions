@@ -48,9 +48,10 @@ refute_tmux_log() {
 
 @test "launcher mounts the current directory and nothing else" {
     cd "$PROJECT"
+    local here; here=$(pwd -P)
     run bash "$LAUNCH"
     assert_success
-    argv_has "$PROJECT:/workspace"
+    argv_has "$here:/workspace"
     argv_has "claude-config-testuser:/home/agent/.claude"
     argv_has "claude-local-testuser:/home/agent/.local"
     argv_has "--cap-drop=ALL"

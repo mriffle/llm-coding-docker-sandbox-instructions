@@ -96,21 +96,28 @@ jobs:
         run: |
           # Each installer is launched as its own process: these scripts call
           # `exit`, which would otherwise terminate the calling runspace.
+          # Note on -match/-notmatch: applied to an ARRAY they filter rather than
+          # test, so `$lines -notmatch 'x'` is truthy whenever any single line
+          # lacks 'x'. Every captured output is collapsed with Out-String first.
           $env:SANDBOX_STATE_DIR = Join-Path $env:RUNNER_TEMP 'sandbox-state'
+          $want = (Get-Content VERSION -Raw).Trim()
           foreach ($agent in @('claude','codex')) {
               $script = ".\install\$agent.ps1"
 
-              $v = & pwsh -NoProfile -File $script -Version
+              $v = (& pwsh -NoProfile -File $script -Version | Out-String).Trim()
               if ($LASTEXITCODE -ne 0) { throw "$agent -Version exited $LASTEXITCODE" }
-              if ($v.Trim() -ne (Get-Content VERSION).Trim()) { throw "$agent reported version '$v'" }
+              if ($v -ne $want) { throw "$agent reported version '$v', expected '$want'" }
 
               & pwsh -NoProfile -File $script -Help | Out-Null
               if ($LASTEXITCODE -ne 0) { throw "$agent -Help exited $LASTEXITCODE" }
 
               # On a clean machine -Check must say "not installed" and exit 1,
               # without needing a daemon.
-              $out = & pwsh -NoProfile -File $script -Check
-              if ($LASTEXITCODE -ne 1) { throw "$agent -Check exited $LASTEXITCODE, expected 1" }
+              $out = & pwsh -NoProfile -File $script -Check 2>&1 | Out-String
+              $code = $LASTEXITCODE
+              Write-Host "--- $agent -Check (exit $code) ---"
+              Write-Host $out
+              if ($code -ne 1) { throw "$agent -Check exited $code, expected 1" }
               if ($out -notmatch 'not installed') { throw "$agent -Check did not report 'not installed'" }
           }
           Write-Host 'windows smoke: ok'
@@ -154,7 +161,7 @@ jobs:
           (Get-Content src\ps\assets\claude-sandbox.cmd) -replace '@@VERSION@@','0.0.0' |
               Set-Content (Join-Path $dir 'claude-sandbox.cmd')
           Set-Content (Join-Path $dir 'claude-sandbox.ps1') 'Write-Host "shim-args:$args"'
-          $out = & cmd /c (Join-Path $dir 'claude-sandbox.cmd') --sandbox-version "two words"
+          $out = & cmd /c (Join-Path $dir 'claude-sandbox.cmd') --sandbox-version "two words" | Out-String
           if ($LASTEXITCODE -ne 0) { throw "shim exited $LASTEXITCODE" }
           Write-Host $out
           if ($out -notmatch 'shim-args:') { throw 'shim did not reach the PowerShell script' }

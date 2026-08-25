@@ -69,7 +69,7 @@ path_without() {
     done
     for t in bash sh env id date tr cut head tail find mkdir rmdir rm cp mv ln chmod \
              stat cat grep sed awk sort uniq wc basename dirname mktemp df cksum \
-             sha256sum shasum touch tee pwd sleep timeout uname expr getent xargs; do
+             sha256sum shasum touch tee pwd sleep timeout uname expr getent xargs pwsh; do
         [ "$t" = "$skip" ] && continue
         command -v "$t" >/dev/null 2>&1 && ln -sf "$(command -v "$t")" "$dir/$t"
     done
