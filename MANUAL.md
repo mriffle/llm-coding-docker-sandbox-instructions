@@ -129,7 +129,7 @@ RUN curl -fsSL --retry 3 --retry-connrefused https://sh.rustup.rs -o /tmp/rustup
     && chmod -R a+rX ${RUSTUP_HOME} ${CARGO_HOME}
 
 # Non-root user (required: claude rejects --dangerously-skip-permissions as
-# root). UID/GID must match the host user so the bind-mounted /workspace is
+# root). UID/GID must match the host user so the bind-mounted project is
 # writable — pass them at build time; the image is therefore built per user.
 #
 # node:24-slim already ships a `node` user at UID/GID 1000, which is the first
@@ -154,6 +154,9 @@ RUN set -eux; \
         useradd -m -s /bin/bash -u "${UID}" -g "${GID}" agent; \
     fi
 USER agent
+# Only the default, for a container run by hand. The launchers override it with
+# `docker run -w`, mounting the project at the same path it has on the host so
+# that each project keeps its own agent memory and session history.
 WORKDIR /workspace
 
 # Cargo runtime writes (registry cache, `cargo install`) go to writable
@@ -181,6 +184,13 @@ Save this as `~/.local/bin/claude-sandbox` (see "Before you start" for the PATH 
 # claude-sandbox — run Claude Code sandboxed in the current directory.
 # Shared rootful Docker: volumes are namespaced per host user to avoid
 # collisions in the daemon's global volume namespace.
+#
+# The project is mounted at the path it already has on the host, not at a fixed
+# /workspace. Claude Code keys its session transcripts and memory on the working
+# directory (~/.claude/projects/<cwd-slugified>/), as does .claude.json for
+# per-project approvals, so a fixed mount would make every repository on the
+# machine one project: a single shared memory store and a --resume list mixing
+# all of them together. Codex records the same cwd in every session rollout.
 
 CONFIG_VOL="claude-config-$USER"
 LOCAL_VOL="claude-local-$USER"
@@ -189,7 +199,7 @@ docker volume create "$LOCAL_VOL" >/dev/null
 
 exec docker run -it --rm \
   --name "claude-$USER-$(basename "$PWD")-$(date +%s)" \
-  -v "$PWD:/workspace" \
+  -v "$PWD:$PWD" -w "$PWD" \
   -v "$CONFIG_VOL:/home/agent/.claude" \
   -v "$LOCAL_VOL:/home/agent/.local" \
   -e "GIT_CONFIG_COUNT=2" \
@@ -268,7 +278,7 @@ This drops you straight into the running session inside tmux. Detach (leave it r
 
 | Path in container | Backing | Lifetime |
 | --- | --- | --- |
-| `/workspace` | bind mount of `$PWD` | your repo — permanent |
+| your project's own path | bind mount of `$PWD` | your repo — permanent |
 | `~/.claude` | `claude-config-$USER` volume | auth, settings, plugins, session history — permanent |
 | `~/.local` | `claude-local-$USER` volume | auto-updated Claude binary — permanent |
 | everything else (`~/.cargo`, `~/.npm-global`, …) | container layer | discarded at session exit |
@@ -336,6 +346,9 @@ RUN set -eux; \
         useradd -m -s /bin/bash -u "${UID}" -g "${GID}" agent; \
     fi
 USER agent
+# Only the default, for a container run by hand. The launchers override it with
+# `docker run -w`, mounting the project at the same path it has on the host so
+# that each project keeps its own agent memory and session history.
 WORKDIR /workspace
 
 ENV CARGO_HOME=/home/agent/.cargo
@@ -364,6 +377,9 @@ Save this as `~/.local/bin/codex-sandbox`, then `chmod 755 ~/.local/bin/codex-sa
 ```bash
 #!/bin/bash
 # codex-sandbox — run Codex CLI sandboxed in the current directory.
+# The project is mounted at its host path for the same reason as in
+# claude-sandbox above: Codex writes the cwd into every session rollout, so a
+# fixed /workspace makes `codex resume` unable to tell projects apart.
 # Codex has no self-updater: check the npm registry for a newer version and
 # rebuild the image only when the version actually changed (tracked via an
 # image label). Prints progress when rebuilding; silent when up to date.
@@ -401,7 +417,7 @@ fi
 
 exec docker run -it --rm \
   --name "codex-$USER-$(basename "$PWD")-$(date +%s)" \
-  -v "$PWD:/workspace" \
+  -v "$PWD:$PWD" -w "$PWD" \
   -v "$CONFIG_VOL:/home/agent/.codex" \
   -e "GIT_CONFIG_COUNT=2" \
   -e "GIT_CONFIG_KEY_0=user.name"  -e "GIT_CONFIG_VALUE_0=$(git config --get user.name)" \
@@ -490,8 +506,8 @@ The images deliberately omit occasional-use toolchains (Java, Go, etc.). Project
 
 - **Concurrent sessions (one user):** fully supported. Containers are independent; the shared volumes tolerate concurrency (this is the same as running the agent in several terminal tabs). The only real hazard is two sessions editing the *same checkout* — use `git worktree` for parallel work on one repo.
 - **Multiple users (shared rootful Docker):** the `$USER`-namespaced volumes prevent *accidental* cross-user interference. They do **not** prevent deliberate access: anyone in the `docker` group can mount anyone's volume, because docker-group membership on a rootful daemon is root-equivalent. Treat this configuration as *collision-proof, not confidential*. If users on the box aren't mutually trusted with each other's agent credentials, use [rootless Docker](https://docs.docker.com/engine/security/rootless/) per user instead — every user gets an isolated daemon and truly private volumes, and these instructions work identically (drop the `$USER` suffixes if you like).
-- **Why images are per-user too:** the container's `agent` user must have *your* UID, or the bind-mounted `/workspace` (owned by you on the host) isn't writable from inside — the agent will report something like "couldn't save, /workspace is owned by UID 1003 but this session runs as UID 1001." That's why every build command passes `--build-arg UID=$(id -u) --build-arg GID=$(id -g)` and tags the image `*-$USER`. Docker layer caching keeps this cheap: users with identical Dockerfiles share all layers up to the `useradd`.
-- **Troubleshooting UID mismatches on existing volumes:** if you built an image before setting the UID args (or your UID changed), your volumes may contain files owned by the old UID and the agent can't write its own config. Symptoms include the `/workspace is owned by UID X but this session runs as UID Y` message, and for Codex specifically a startup failure like `unable to open database file` for `~/.codex/state_5.sqlite` plus `could not create PATH aliases: Permission denied` — that means the *image's* agent UID and the *volume's* file ownership disagree. Verify with `docker run --rm codex-sandbox-$USER id -u` (should print your `id -u`). Fix by rebuilding the image with the UID build-args, then chowning the volumes in place without losing auth:
+- **Why images are per-user too:** the container's `agent` user must have *your* UID, or the bind-mounted project (owned by you on the host) isn't writable from inside — the agent will report something like "couldn't save, /home/you/dev/thing is owned by UID 1003 but this session runs as UID 1001." That's why every build command passes `--build-arg UID=$(id -u) --build-arg GID=$(id -g)` and tags the image `*-$USER`. Docker layer caching keeps this cheap: users with identical Dockerfiles share all layers up to the `useradd`.
+- **Troubleshooting UID mismatches on existing volumes:** if you built an image before setting the UID args (or your UID changed), your volumes may contain files owned by the old UID and the agent can't write its own config. Symptoms include the `... is owned by UID X but this session runs as UID Y` message, and for Codex specifically a startup failure like `unable to open database file` for `~/.codex/state_5.sqlite` plus `could not create PATH aliases: Permission denied` — that means the *image's* agent UID and the *volume's* file ownership disagree. Verify with `docker run --rm codex-sandbox-$USER id -u` (should print your `id -u`). Fix by rebuilding the image with the UID build-args, then chowning the volumes in place without losing auth:
   ```bash
   docker run --rm -v "claude-config-$USER:/v" alpine chown -R "$(id -u):$(id -g)" /v
   docker run --rm -v "claude-local-$USER:/v"  alpine chown -R "$(id -u):$(id -g)" /v

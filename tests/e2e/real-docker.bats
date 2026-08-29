@@ -72,14 +72,31 @@ assert_output_contains() { case "$output" in *"$1"*) return 0 ;; *) fail_with "e
     [ "$output" = "$(file_sha "$HOME/claude-sandbox/Dockerfile")" ]
 }
 
-@test "e2e: a bind-mounted workspace is writable from inside the container" {
-    mkdir -p "$BATS_TEST_TMPDIR/project"
-    run docker run --rm -v "$BATS_TEST_TMPDIR/project:/workspace" --cap-drop=ALL \
+@test "e2e: the project is mounted at its host path, and is writable there" {
+    # The mount the launchers actually use. The container's cwd being the
+    # host's path is the whole point: Claude Code keys its memory and session
+    # transcripts on it, and Codex records it in every rollout, so a fixed
+    # /workspace made every project on the machine one project. The space in
+    # the directory name is deliberate — it has to survive as one argument.
+    local proj="$BATS_TEST_TMPDIR/some project"
+    mkdir -p "$proj"
+    run docker run --rm -v "$proj:$proj" -w "$proj" --cap-drop=ALL \
         --security-opt=no-new-privileges "$CLAUDE_IMAGE" \
-        sh -c 'echo written-by-agent > /workspace/proof.txt'
+        sh -c 'pwd; echo written-by-agent > proof.txt'
     assert_success
-    [ "$(cat "$BATS_TEST_TMPDIR/project/proof.txt")" = "written-by-agent" ]
-    [ -O "$BATS_TEST_TMPDIR/project/proof.txt" ]
+    assert_output_contains "$proj"
+    [ "$(cat "$proj/proof.txt")" = "written-by-agent" ]
+    [ -O "$proj/proof.txt" ]
+}
+
+@test "e2e: two projects mounted this way have two different cwds" {
+    local a="$BATS_TEST_TMPDIR/alpha" b="$BATS_TEST_TMPDIR/beta" out_a out_b
+    mkdir -p "$a" "$b"
+    out_a=$(docker run --rm -v "$a:$a" -w "$a" "$CLAUDE_IMAGE" pwd)
+    out_b=$(docker run --rm -v "$b:$b" -w "$b" "$CLAUDE_IMAGE" pwd)
+    [ "$out_a" = "$a" ] || fail_with "expected cwd $a, got $out_a"
+    [ "$out_b" = "$b" ] || fail_with "expected cwd $b, got $out_b"
+    [ "$out_a" != "$out_b" ] || fail_with "both projects reported the same cwd"
 }
 
 @test "e2e: claude actually runs inside the image" {

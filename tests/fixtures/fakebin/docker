@@ -13,6 +13,8 @@
 #   FAKE_DOCKER_BUILD_RC     exit code for `docker build`       (default 0)
 #   FAKE_DOCKER_BUILD_OUT    extra text emitted during a build
 #   FAKE_DOCKER_NEW_VOL_UID  owner recorded for newly created volumes
+#   FAKE_DOCKER_LEGACY_PROJECTS  pretend the config volume still holds the
+#                            pooled projects/-workspace directory
 set -u
 
 S="${FAKE_DOCKER_STATE:?FAKE_DOCKER_STATE must be set}"
@@ -178,6 +180,10 @@ run)
     case "$rest" in
         *entrypoint*)
             printf '%s\n' "${FAKE_DOCKER_IMAGE_UID:-1001}"; exit 0 ;;
+        *projects/-workspace*)
+            # `doctor` probing the config volume for state left behind by the
+            # old fixed /workspace mount. Absent unless a test asks for it.
+            [ -n "${FAKE_DOCKER_LEGACY_PROJECTS:-}" ]; exit $? ;;
         *stat*)
             [ -n "$mounted" ] && cat "$(vol_owner "$mounted")" 2>/dev/null
             printf '\n'; exit 0 ;;

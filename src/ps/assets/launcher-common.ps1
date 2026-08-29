@@ -42,6 +42,56 @@ function Get-ProjectSlug {
     return ($leaf -replace '[^a-zA-Z0-9_.-]', '-')
 }
 
+# --- where the project lives inside the container --------------------------
+# Both agents key their per-project state on the working directory *string*:
+# Claude Code's ~/.claude/projects/<cwd-slugified>/ (session transcripts and
+# memory), its per-project approvals in .claude.json, and the cwd Codex records
+# in every rollout for `codex resume`. Mount every project at a fixed
+# /workspace and they are all one project to the agent. The shell launcher
+# carries the full note; this is the same mechanism with Windows paths
+# translated.
+
+function Get-HostWorkdir {
+    if ($env:SANDBOX_FAKE_PWD) { return $env:SANDBOX_FAKE_PWD }
+    return (Get-Location).Path
+}
+
+# C:\Users\x\p -> /mnt/c/Users/x/p — the form WSL itself uses, so the same
+# folder reached from PowerShell and from WSL is one project and not two. Only
+# this destination is translated; the mount source keeps its native form,
+# which is what Docker Desktop expects.
+function ConvertTo-ContainerPath {
+    param([string]$Path)
+    if ($Path -match '^[A-Za-z]:') {
+        $drive = $Path.Substring(0, 1).ToLower()
+        $rest = ($Path.Substring(2) -replace '\\', '/').TrimStart('/')
+        return "/mnt/$drive/$rest".TrimEnd('/')
+    }
+    if ($Path.StartsWith('\\')) {       # UNC: \\server\share\p
+        $rest = ($Path.TrimStart('\') -replace '\\', '/').TrimStart('/')
+        return "/mnt/unc/$rest".TrimEnd('/')
+    }
+    return $Path                        # already POSIX (pwsh on Linux/macOS)
+}
+
+# The mirrored path, unless it would land the mount on the container's own
+# filesystem rather than in a fresh directory. Mirrors the shell launcher's
+# guard list, including /home/agent — the agent's own home, which a host user
+# actually named `agent` would otherwise expose in full.
+function Get-ContainerWorkdir {
+    if ($env:SANDBOX_WORKDIR) { return $env:SANDBOX_WORKDIR }
+    $reserved = @('/', '/bin', '/boot', '/dev', '/etc', '/home', '/lib', '/lib32',
+                  '/lib64', '/media', '/mnt', '/opt', '/proc', '/root', '/run',
+                  '/sbin', '/srv', '/sys', '/tmp', '/usr', '/var', '/home/agent')
+    $p = ConvertTo-ContainerPath (Get-HostWorkdir)
+    if ($p -notlike '/*' -or $reserved -contains $p -or $p -like '/home/agent/*') {
+        Write-Note "cannot mirror $p inside the container; using /workspace"
+        Write-Note "(the agent's memory and session history there are shared with other such projects)"
+        return '/workspace'
+    }
+    return $p
+}
+
 function Assert-DockerAndImage {
     if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
         Stop-Launcher "docker is not installed or not on PATH — see $RepoUrl"
@@ -176,10 +226,12 @@ function Get-GitEnvArgs {
 function Invoke-Container {
     param([string[]]$Passthrough)
     $name = "$Agent-$(Get-User)-$(Get-ProjectSlug)-$([DateTimeOffset]::Now.ToUnixTimeSeconds())"
+    $workdir = Get-ContainerWorkdir
     $dockerArgs = @(
         'run', '-it', '--rm',
         '--name', $name,
-        '-v', "$((Get-Location).Path):/workspace"
+        '-v', "$(Get-HostWorkdir):$workdir",
+        '-w', $workdir
     ) + $MountArgs + @(Get-GitEnvArgs) + @(
         '--cap-drop=ALL',
         '--security-opt=no-new-privileges',
@@ -196,6 +248,7 @@ function Show-Doctor {
     Write-Host "$AgentName sandbox — doctor"
     Write-Host "  launcher version    $SandboxVersion"
     Write-Host "  user                $(Get-User)"
+    Write-Host "  project mount       $(Get-HostWorkdir) -> $(Get-ContainerWorkdir)"
 
     if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
         Write-Host "  docker              NOT INSTALLED"; return
@@ -217,6 +270,22 @@ function Show-Doctor {
         & docker volume inspect $v 2>&1 | Out-Null
         if ($LASTEXITCODE -eq 0) { Write-Host "  volume $v ok" }
         else { Write-Host "  volume $v MISSING" }
+    }
+
+    # State recorded before the mount mirrored the host path is pooled under one
+    # directory named for the old fixed mount. Nothing can attribute any of it
+    # back to a project, so it is reported, never migrated.
+    if ($Agent -eq 'claude') {
+        & docker image inspect $Image 2>&1 | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            & docker run --rm --user 0:0 -v "${ConfigVol}:/v" $Image sh -c 'test -d /v/projects/-workspace' 2>&1 | Out-Null
+            if ($LASTEXITCODE -eq 0) {
+                Write-Host "  legacy state        projects/-workspace holds sessions and memory recorded"
+                Write-Host "                      before the mount mirrored the host path, pooled across"
+                Write-Host "                      every project. Nothing is lost; list it with:"
+                Write-Host "                        docker run --rm -v ${ConfigVol}:/v $Image ls /v/projects"
+            }
+        }
     }
 
     $manifest = Join-Path (Get-StateDirPath) "$Agent.manifest"
@@ -289,10 +358,18 @@ token's own permissions apply — prefer a fine-grained one.
 There is no --sandbox-tmux on native Windows; for detachable sessions, run
 the sandbox from WSL instead (see WINDOWS.md, Route A).
 
+The project is mounted inside the container at the same path it has on the
+host (C:\Users\you\repo becomes /mnt/c/Users/you/repo), so each project keeps
+its own agent memory, session history and approvals. SANDBOX_WORKDIR overrides
+that if you need the old fixed path.
+
 Environment:
   SANDBOX_NO_UPDATE_CHECK=1   never check upstream for a newer sandbox
   SANDBOX_NO_GIT=1            pass no git identity or credential at all
   SANDBOX_GIT=1               same as --sandbox-git
+  SANDBOX_WORKDIR=/workspace  mount the project at this fixed path instead
+                              (its agent state is then shared with every
+                              other project run the same way)
 "@
 }
 

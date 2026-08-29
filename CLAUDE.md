@@ -67,13 +67,14 @@ pins `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_NOSYSTEM`, `XDG_CONFIG_HOME` and
 close it.
 Production code carries deliberate test seams, all named `SANDBOX_FAKE_*`:
 `SANDBOX_FAKE_UID`, `SANDBOX_FAKE_UNAME_S`, `SANDBOX_OS_RELEASE`,
-`SANDBOX_PROC_VERSION`, `SANDBOX_FAKE_EUID`, and so on.
+`SANDBOX_PROC_VERSION`, `SANDBOX_FAKE_EUID`, `SANDBOX_FAKE_PWD`, and so on.
 
 **Tests must not assume Linux.** Do not invent a `PATH` from scratch (use
 `path_excluding` / `path_without` in `tests/helper.bash`); pin the platform with
-`SANDBOX_FAKE_UNAME_S=Linux` when asserting Linux-only output; and remember the
-shell launcher mounts bash's *logical* `$PWD` while the PowerShell one reports
-the *physical* path — they differ on macOS, where `/var` is a symlink.
+`SANDBOX_FAKE_UNAME_S=Linux` when asserting Linux-only output; and remember
+that both launchers mount the *physical* working directory (`pwd -P`), which on
+macOS is the `/private/var` form and not the `/var` one — a test asserting on
+bash's logical `$PWD` passes on Linux and fails there.
 
 Sweep for hidden assumptions with:
 
@@ -123,6 +124,18 @@ runs under `pwsh` on the Linux runner.
   PowerShell needs the explicit `-PrintPath` switch instead of an
   is-it-captured test: its success stream reaches `| iex` without the
   process's stdout ever being redirected.
+- **One mount point is one project identity.** Both agents key their
+  per-project state on the working directory *string* — Claude Code's
+  `~/.claude/projects/<cwd-slugified>/` (session transcripts *and* memory), the
+  per-project approvals in `.claude.json`, and the `cwd` Codex writes into every
+  session rollout. Mounting every project at a fixed `/workspace`, as v1.0.0
+  did, made every repository on the host one project to the agent: a single
+  shared memory store, a `--resume` list mixing them all, and approvals leaking
+  between them. The launchers mirror the host path instead (`-v "$PWD:$PWD" -w
+  "$PWD"`; on Windows `C:\x` becomes `/mnt/c/x`, matching WSL). Do not
+  reintroduce a constant mount path — and if a guard ever sends a project back
+  to `/workspace`, it must say so out loud, because a silent fallback rebuilds
+  the collision invisibly.
 
 ## Docs
 

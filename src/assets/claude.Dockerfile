@@ -33,7 +33,7 @@ RUN curl -fsSL --retry 3 --retry-connrefused https://sh.rustup.rs -o /tmp/rustup
     && chmod -R a+rX ${RUSTUP_HOME} ${CARGO_HOME}
 
 # Non-root user (required: claude rejects --dangerously-skip-permissions as
-# root). UID/GID must match the host user so the bind-mounted /workspace is
+# root). UID/GID must match the host user so the bind-mounted project is
 # writable — pass them at build time; the image is therefore built per user.
 #
 # node:24-slim already ships a `node` user at UID/GID 1000, which is the first
@@ -58,6 +58,9 @@ RUN set -eux; \
         useradd -m -s /bin/bash -u "${UID}" -g "${GID}" agent; \
     fi
 USER agent
+# Only the default, for a container run by hand. The launchers override it with
+# `docker run -w`, mounting the project at the same path it has on the host so
+# that each project keeps its own agent memory and session history.
 WORKDIR /workspace
 
 # Cargo runtime writes (registry cache, `cargo install`) go to writable

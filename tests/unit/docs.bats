@@ -115,6 +115,17 @@ RAW_BASE="https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main"
     done < <(grep -E '^(FROM|RUN|ENV|ARG|USER|WORKDIR) ' "$REPO_ROOT/src/assets/claude.Dockerfile")
 }
 
+@test "the README documents the mount the launchers actually use" {
+    # The fixed /workspace mount gave every project one agent identity; the
+    # README has to describe the mirrored mount and the way back out of it.
+    assert_file_contains "$REPO_ROOT/README.md" 'SANDBOX_WORKDIR'
+    grep -qF -- 'container_workdir' "$REPO_ROOT/install/claude.sh" \
+        || fail_with "README documents SANDBOX_WORKDIR but the launcher has no such override"
+    grep -qF -- 'SANDBOX_WORKDIR' "$REPO_ROOT/install/claude.ps1" \
+        || fail_with "the PowerShell launcher is missing the SANDBOX_WORKDIR override"
+    refute_file_contains "$REPO_ROOT/README.md" '| `/workspace` | bind mount'
+}
+
 @test "CLAUDE.md documents the constraints that have actually broken the build" {
     local f="$REPO_ROOT/CLAUDE.md"
     assert_file_exists "$f"

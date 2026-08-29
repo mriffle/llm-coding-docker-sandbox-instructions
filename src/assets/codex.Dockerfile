@@ -47,6 +47,9 @@ RUN set -eux; \
         useradd -m -s /bin/bash -u "${UID}" -g "${GID}" agent; \
     fi
 USER agent
+# Only the default, for a container run by hand. The launchers override it with
+# `docker run -w`, mounting the project at the same path it has on the host so
+# that each project keeps its own agent memory and session history.
 WORKDIR /workspace
 
 ENV CARGO_HOME=/home/agent/.cargo

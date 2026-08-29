@@ -298,16 +298,80 @@ ps_install() {
     mkdir -p "$TESTDIR/proj"
     cd "$TESTDIR/proj"
     # PowerShell reports the *physical* working directory, so on macOS this is
-    # the /private/var form. (The shell launcher is the opposite: it mounts
-    # bash's logical $PWD; see launcher.bats.)
+    # the /private/var form. (The shell launcher now agrees; it used to mount
+    # bash's logical $PWD. See launcher.bats.)
     local here; here=$(pwd -P)
     : > "$FAKE_DOCKER_ARGV"
     run "$PWSH" -NoProfile -File "$LAUNCHER" --dangerously-skip-permissions
     assert_success
-    grep -qxF -- "$here:/workspace" "$FAKE_DOCKER_ARGV"
+    grep -qxF -- "$here:$here" "$FAKE_DOCKER_ARGV"
+    grep -qxF -- "-w" "$FAKE_DOCKER_ARGV"
     grep -qxF -- "claude-config-testuser:/home/agent/.claude" "$FAKE_DOCKER_ARGV"
     grep -qxF -- "--dangerously-skip-permissions" "$FAKE_DOCKER_ARGV"
     grep -qxF -- "--cap-drop=ALL" "$FAKE_DOCKER_ARGV"
+}
+
+# --- one mount point would be one project identity -------------------------
+# The launcher mirrors the host path so each project keeps its own agent memory
+# and session history. A Windows path is not a Linux path, so it is translated
+# to the form WSL uses — which also means the same folder reached from
+# PowerShell and from WSL is one project, not two. This job usually runs under
+# pwsh on Linux, where Get-Location is already POSIX, so the translation is
+# driven through SANDBOX_FAKE_PWD.
+
+@test "ps launcher: a Windows path is mirrored as /mnt/<drive>" {
+    ps_install claude
+    : > "$FAKE_DOCKER_ARGV"
+    SANDBOX_FAKE_PWD='C:\Users\mike\dev\my project' \
+        run "$PWSH" -NoProfile -File "$LAUNCHER"
+    assert_success
+    # The source keeps its native form; only the destination is translated.
+    grep -qxF -- 'C:\Users\mike\dev\my project:/mnt/c/Users/mike/dev/my project' "$FAKE_DOCKER_ARGV" \
+        || fail_with "expected the mirrored mount; argv was: $(cat "$FAKE_DOCKER_ARGV")"
+    grep -qxF -- '/mnt/c/Users/mike/dev/my project' "$FAKE_DOCKER_ARGV" \
+        || fail_with "expected -w to carry the same path"
+}
+
+@test "ps launcher: a UNC path gets its own namespace" {
+    ps_install claude
+    : > "$FAKE_DOCKER_ARGV"
+    SANDBOX_FAKE_PWD='\\srv\share\repo' run "$PWSH" -NoProfile -File "$LAUNCHER"
+    assert_success
+    grep -qxF -- '\\srv\share\repo:/mnt/unc/srv/share/repo' "$FAKE_DOCKER_ARGV" \
+        || fail_with "expected a UNC mirror; argv was: $(cat "$FAKE_DOCKER_ARGV")"
+}
+
+@test "ps launcher: two Windows directories get two container paths" {
+    ps_install claude
+    : > "$FAKE_DOCKER_ARGV"
+    SANDBOX_FAKE_PWD='C:\dev\alpha' run "$PWSH" -NoProfile -File "$LAUNCHER"
+    assert_success
+    grep -qxF -- '/mnt/c/dev/alpha' "$FAKE_DOCKER_ARGV"
+    : > "$FAKE_DOCKER_ARGV"
+    SANDBOX_FAKE_PWD='C:\dev\beta' run "$PWSH" -NoProfile -File "$LAUNCHER"
+    assert_success
+    grep -qxF -- '/mnt/c/dev/beta' "$FAKE_DOCKER_ARGV"
+    grep -qxF -- '/mnt/c/dev/alpha' "$FAKE_DOCKER_ARGV" \
+        && fail_with "the second launch reused the first project's path"
+    return 0
+}
+
+@test "ps launcher: SANDBOX_WORKDIR pins the old fixed mount" {
+    ps_install claude
+    : > "$FAKE_DOCKER_ARGV"
+    SANDBOX_WORKDIR=/workspace SANDBOX_FAKE_PWD='C:\dev\alpha' \
+        run "$PWSH" -NoProfile -File "$LAUNCHER"
+    assert_success
+    grep -qxF -- 'C:\dev\alpha:/workspace' "$FAKE_DOCKER_ARGV"
+}
+
+@test "ps launcher: a directory that cannot be mirrored falls back and says so" {
+    ps_install claude
+    : > "$FAKE_DOCKER_ARGV"
+    SANDBOX_FAKE_PWD=/home/agent run "$PWSH" -NoProfile -File "$LAUNCHER"
+    assert_success
+    assert_output_contains 'cannot mirror /home/agent'
+    grep -qxF -- '/home/agent:/workspace' "$FAKE_DOCKER_ARGV"
 }
 
 @test "ps launcher: --sandbox-version and --sandbox-help start no container" {

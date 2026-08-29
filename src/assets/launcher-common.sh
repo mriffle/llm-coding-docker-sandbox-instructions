@@ -94,6 +94,52 @@ short_hash() {
     fi
 }
 
+# --- where the project lives inside the container --------------------------
+# Both agents key their per-project state on the *working directory string*:
+# Claude Code stores session transcripts and memory under
+# ~/.claude/projects/<cwd-slugified>/, records per-project approvals and trust
+# under that path in .claude.json, and Codex writes the cwd into every rollout
+# for `codex resume`. Mount every project at a fixed /workspace and all of them
+# are one project to the agent — one shared memory store, one mixed resume
+# list, approvals leaking between repositories. Mirroring the host path keeps
+# each project distinct, and has the side benefit that paths the agent prints
+# are paths that resolve on the host.
+
+# Physical, not bash's logical $PWD. Reaching one project through a symlink
+# must not look like a second project, or it acquires a second memory store.
+host_workdir() {
+    if [ -n "${SANDBOX_FAKE_PWD:-}" ]; then printf '%s' "$SANDBOX_FAKE_PWD"; return; fi
+    pwd -P 2>/dev/null || printf '%s' "$PWD"
+}
+
+# The host path, unless mirroring it would land the mount *on* the container's
+# own filesystem instead of in a fresh directory. Mounting under a system
+# directory (/opt/proj, /tmp/proj, macOS's /var/folders/x/proj) is fine —
+# docker just creates it — so only these exact paths fall back:
+#   /, /home and the bare top-level directories, which the image needs, and
+#   /home/agent, which is the agent's own home: a host user actually named
+#   `agent` would otherwise expose their entire home directory to a session
+#   that is supposed to see nothing but the project.
+# The fallback warns. A silent one would rebuild the collision invisibly.
+container_workdir() {
+    local p
+    if [ -n "${SANDBOX_WORKDIR:-}" ]; then printf '%s' "$SANDBOX_WORKDIR"; return; fi
+    p=$(host_workdir)
+    case "$p" in
+        /home/agent|/home/agent/*) p='' ;;
+        /|/bin|/boot|/dev|/etc|/home|/lib|/lib32|/lib64|/media|/mnt|/opt) p='' ;;
+        /proc|/root|/run|/sbin|/srv|/sys|/tmp|/usr|/var) p='' ;;
+        /*) ;;
+        *) p='' ;;
+    esac
+    if [ -z "$p" ]; then
+        lwarn "cannot mirror $(host_workdir) inside the container; using /workspace"
+        lwarn "(the agent's memory and session history there are shared with other such projects)"
+        p=/workspace
+    fi
+    printf '%s' "$p"
+}
+
 # --- git -------------------------------------------------------------------
 # Identity always, a credential only on request. Both travel as environment;
 # no new host path is ever mounted.
@@ -203,12 +249,16 @@ git_env_args() {
 }
 
 run_container() {
+    local src dst
+    src=$(host_workdir)
+    dst=$(container_workdir)
     git_env_args
     # The ${a[@]+"${a[@]}"} form, not a bare "${a[@]}": expanding an *empty*
     # array under `set -u` is fatal on bash 3.2, which is still macOS /bin/bash.
     exec docker run -it --rm \
         --name "$(container_name)" \
-        -v "$PWD:/workspace" \
+        -v "$src:$dst" \
+        -w "$dst" \
         "${MOUNT_ARGS[@]}" \
         ${GIT_ENV_ARGS[@]+"${GIT_ENV_ARGS[@]}"} \
         --cap-drop=ALL \
@@ -286,6 +336,7 @@ doctor() {
     printf '%s sandbox — doctor\n' "$AGENT_NAME"
     printf '  launcher version    %s (%s)\n' "$SANDBOX_VERSION" "$(launcher_self)"
     printf '  user / uid          %s / %s\n' "$(sandbox_user)" "$(id -u)"
+    printf '  project mount       %s -> %s\n' "$(host_workdir)" "$(container_workdir)"
 
     if ! have docker; then printf '  docker              NOT INSTALLED\n'; return 1; fi
     if ! docker info >/dev/null 2>&1; then printf '  docker              UNREACHABLE\n'; return 1; fi
@@ -318,6 +369,20 @@ doctor() {
             printf '  volume %-12s MISSING\n' "$vol"
         fi
     done
+
+    # State recorded before the mount mirrored the host path is pooled under one
+    # directory named for the old fixed mount. Nothing can attribute any of it
+    # back to a project, so it is reported, never migrated.
+    if [ "$AGENT" = claude ] \
+        && docker image inspect "$IMAGE" >/dev/null 2>&1 \
+        && docker volume inspect "$CONFIG_VOL" >/dev/null 2>&1 \
+        && docker run --rm --user 0:0 -v "$CONFIG_VOL:/v" "$IMAGE" \
+            sh -c 'test -d /v/projects/-workspace' >/dev/null 2>&1; then
+        printf '  legacy state        projects/-workspace holds sessions and memory recorded\n'
+        printf '                      before the mount mirrored the host path, pooled across\n'
+        printf '                      every project. Nothing is lost; list it with:\n'
+        printf '                        docker run --rm -v %s:/v %s ls /v/projects\n' "$CONFIG_VOL" "$IMAGE"
+    fi
 
     manifest="$(state_dir)/$AGENT.manifest"
     if [ -r "$manifest" ]; then
@@ -385,10 +450,17 @@ Your git name and email are always passed through, so the agent can commit.
 so it can push. That credential is scoped to that one host, but within it the
 token's own permissions apply — prefer a fine-grained one.
 
+The project is mounted inside the container at the same path it has on the
+host, so each project keeps its own agent memory, session history and
+approvals. SANDBOX_WORKDIR overrides that if you need the old fixed path.
+
 Environment:
   SANDBOX_NO_UPDATE_CHECK=1   never check upstream for a newer sandbox
   SANDBOX_NO_GIT=1            pass no git identity or credential at all
   SANDBOX_GIT=1               same as --sandbox-git
+  SANDBOX_WORKDIR=/workspace  mount the project at this fixed path instead
+                              (its agent state is then shared with every
+                              other project run the same way)
 USAGE
 }
 

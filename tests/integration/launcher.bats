@@ -48,17 +48,89 @@ refute_tmux_log() {
 
 @test "launcher mounts the current directory and nothing else" {
     cd "$PROJECT"
-    # The shell launcher mounts "$PWD", which bash keeps *logical* — on macOS
-    # that is the /var form, not the /private/var one `pwd -P` would give.
-    # (The PowerShell launcher is the opposite; see powershell.bats.)
-    local here=$PWD
+    # The *physical* path, not bash's logical $PWD: one project reached through
+    # a symlink must not look like two, or it gets two memory stores. (On macOS
+    # these differ — /var vs /private/var. The PowerShell launcher has always
+    # reported the physical path; the two now agree.)
+    local here; here=$(pwd -P)
     run bash "$LAUNCH"
     assert_success
-    argv_has "$here:/workspace"
+    argv_has "$here:$here"
     argv_has "claude-config-testuser:/home/agent/.claude"
     argv_has "claude-local-testuser:/home/agent/.local"
     argv_has "--cap-drop=ALL"
     argv_has "--security-opt=no-new-privileges"
+}
+
+# --- one mount point would be one project identity -------------------------
+# Both agents key their per-project state on the working directory string:
+# Claude Code's ~/.claude/projects/<cwd-slug>/ holds the session transcripts
+# and memory, and Codex records the cwd in every rollout. Mounting every
+# project at a fixed /workspace made them all one project to the agent.
+
+@test "the container's working directory mirrors the host path" {
+    cd "$PROJECT"
+    # $PROJECT contains a space, so this also proves the path survives as one
+    # argument on both the mount and -w (the argv file is one arg per line).
+    local here; here=$(pwd -P)
+    run bash "$LAUNCH"
+    assert_success
+    argv_has "-w"
+    argv_has "$here"
+}
+
+@test "two project directories get two different container paths" {
+    local a b
+    mkdir -p "$TESTDIR/alpha" "$TESTDIR/beta"
+    cd "$TESTDIR/alpha"; a=$(pwd -P)
+    run bash "$LAUNCH"
+    assert_success
+    argv_has "$a:$a"
+
+    : > "$FAKE_DOCKER_ARGV"
+    cd "$TESTDIR/beta"; b=$(pwd -P)
+    run bash "$LAUNCH"
+    assert_success
+    argv_has "$b:$b"
+    [ "$a" != "$b" ] || fail_with "the fixture directories should differ"
+    grep -qxF -- "$a:$a" "$FAKE_DOCKER_ARGV" \
+        && fail_with "the second launch reused the first project's path"
+    return 0
+}
+
+@test "SANDBOX_WORKDIR pins the old fixed mount" {
+    cd "$PROJECT"
+    local here; here=$(pwd -P)
+    SANDBOX_WORKDIR=/workspace run bash "$LAUNCH"
+    assert_success
+    argv_has "$here:/workspace"
+    argv_has "/workspace"
+}
+
+@test "a directory that cannot be mirrored falls back to /workspace and says so" {
+    cd "$PROJECT"
+    local p
+    # / and the bare system directories would mount the host over the image;
+    # /home/agent is the agent's own home, which a host user actually named
+    # `agent` would otherwise expose in full.
+    for p in / /usr /home /home/agent /home/agent/work; do
+        : > "$FAKE_DOCKER_ARGV"
+        SANDBOX_FAKE_PWD="$p" run bash "$LAUNCH"
+        assert_success
+        assert_output_contains "cannot mirror $p inside the container"
+        argv_has "$p:/workspace"
+    done
+}
+
+@test "a directory beneath a system one is still mirrored" {
+    cd "$PROJECT"
+    # Only the exact system paths are reserved. /opt/proj (or macOS's
+    # /var/folders/xx/proj, where the suite's own temp dirs live) just creates
+    # a directory inside the container and is safe to mirror.
+    SANDBOX_FAKE_PWD=/opt/proj run bash "$LAUNCH"
+    assert_success
+    refute_output_contains 'cannot mirror'
+    argv_has "/opt/proj:/opt/proj"
 }
 
 @test "launcher forwards arguments verbatim, spaces and all" {
@@ -129,6 +201,25 @@ refute_tmux_log() {
     run bash "$LAUNCH" --sandbox-doctor
     assert_output_contains 'MISMATCH'
     assert_output_contains 're-run the installer'
+}
+
+@test "--sandbox-doctor names the mount it will use for this directory" {
+    cd "$PROJECT"
+    local here; here=$(pwd -P)
+    run bash "$LAUNCH" --sandbox-doctor
+    assert_success
+    assert_output_contains "project mount       $here -> $here"
+}
+
+@test "--sandbox-doctor reports state pooled under the old fixed mount" {
+    cd "$PROJECT"
+    run bash "$LAUNCH" --sandbox-doctor
+    assert_success
+    refute_output_contains 'legacy state'
+    FAKE_DOCKER_LEGACY_PROJECTS=1 run bash "$LAUNCH" --sandbox-doctor
+    assert_success
+    assert_output_contains 'legacy state        projects/-workspace'
+    assert_output_contains 'ls /v/projects'
 }
 
 @test "--sandbox-doctor reports a missing image without crashing" {

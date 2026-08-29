@@ -180,7 +180,7 @@ Nothing outside these paths is touched, except one guarded two-line block append
 
 | Path in container | Backing | Lifetime |
 | --- | --- | --- |
-| `/workspace` | bind mount of `$PWD` | your repo — permanent |
+| your project's own path | bind mount of `$PWD` | your repo — permanent |
 | `~/.claude` | `claude-config-$USER` volume | auth, settings, plugins, session history — permanent |
 | `~/.local` | `claude-local-$USER` volume | auto-updated Claude binary — permanent |
 | `~/.codex` | `codex-config-$USER` volume | auth, `config.toml`, state DB — permanent |
@@ -188,6 +188,39 @@ Nothing outside these paths is touched, except one guarded two-line block append
 | everything else (`~/.cargo`, `~/.npm-global`, …) | container layer | discarded at session exit |
 
 Plugins installed via `/plugin install` live in the config volume, so they persist and are shared across all of that user's projects.
+
+### Why the project keeps its own path inside the container
+
+The container sees your project at the same path it has on the host —
+`/home/you/dev/thing` stays `/home/you/dev/thing`, and on native Windows
+`C:\Users\you\dev\thing` becomes `/mnt/c/Users/you/dev/thing`, the form WSL
+itself uses.
+
+That is not cosmetic. Both agents key their per-project state on the **working
+directory string**: Claude Code keeps session transcripts and its memory under
+`~/.claude/projects/<that path, slugified>/`, records per-project tool
+approvals and trust under the same key in `.claude.json`, and Codex writes the
+cwd into every session rollout so `codex resume` can find its way back. Mount
+every project at one fixed `/workspace`, as this sandbox did before v1.1.0, and
+all of them are the *same* project to the agent: one shared memory store, a
+`--resume` list mixing every repository you have ever opened, and approvals
+granted in one project silently applying in the next.
+
+Two consequences worth knowing:
+
+- **State recorded before v1.1.0 stays pooled** in the config volume under
+  `projects/-workspace`. Nothing is lost and nothing is deleted, but it cannot
+  be split back apart — there is no record of which project each session
+  belonged to. `--sandbox-doctor` points at it when it's there; list it with
+  `docker run --rm -v claude-config-$USER:/v claude-sandbox-$USER ls /v/projects`.
+- **If you have `/workspace` written into a project `CLAUDE.md`, `AGENTS.md` or
+  a helper script**, set `SANDBOX_WORKDIR=/workspace` to get the old fixed
+  mount back. Every project run that way shares one identity again, which is
+  the behaviour that env var exists to restore.
+
+A handful of paths cannot be mirrored — `/`, the bare system directories, and
+`/home/agent` (the container's own home). Running from one of those falls back
+to `/workspace` and says so.
 
 **Remote Control:** Claude Code's Remote Control (steer sessions from the Claude app / claude.ai) currently cannot be combined with `--dangerously-skip-permissions` — the flags are mutually exclusive and the mobile UI re-prompts for approvals regardless (see [anthropics/claude-code#31908](https://github.com/anthropics/claude-code/issues/31908)). Pick per session: autonomous (flag, monitor via tmux) or remote-steerable (type `/remote-control` in a session, approve from the app).
 
@@ -210,7 +243,7 @@ The images deliberately omit occasional-use toolchains (Java, Go, etc.). Project
 
 - **Concurrent sessions (one user):** fully supported. Containers are independent; the shared volumes tolerate concurrency (this is the same as running the agent in several terminal tabs). The only real hazard is two sessions editing the *same checkout* — use `git worktree` for parallel work on one repo.
 - **Multiple users (shared rootful Docker):** the `$USER`-namespaced images and volumes prevent *accidental* cross-user interference. They do **not** prevent deliberate access: anyone in the `docker` group can mount anyone's volume, because docker-group membership on a rootful daemon is root-equivalent. Treat this configuration as *collision-proof, not confidential*. If users on the box aren't mutually trusted with each other's agent credentials, use [rootless Docker](https://docs.docker.com/engine/security/rootless/) per user instead — every user gets an isolated daemon and truly private volumes, and the installers work unchanged.
-- **Why images are per-user too:** the container's `agent` user must have *your* UID, or the bind-mounted `/workspace` (owned by you on the host) isn't writable from inside — the agent reports something like "couldn't save, /workspace is owned by UID 1003 but this session runs as UID 1001." The installer passes `--build-arg UID/GID`, tags the image `*-$USER`, records the UID as an image label, and rebuilds automatically if your UID ever stops matching. It also detects volumes left owned by the wrong UID (the failure that breaks Codex's state DB) and repairs them in place, without losing your login. Docker layer caching keeps per-user images cheap: users with identical Dockerfiles share every layer up to the `useradd`.
+- **Why images are per-user too:** the container's `agent` user must have *your* UID, or the bind-mounted project (owned by you on the host) isn't writable from inside — the agent reports something like "couldn't save, /home/you/dev/thing is owned by UID 1003 but this session runs as UID 1001." The installer passes `--build-arg UID/GID`, tags the image `*-$USER`, records the UID as an image label, and rebuilds automatically if your UID ever stops matching. It also detects volumes left owned by the wrong UID (the failure that breaks Codex's state DB) and repairs them in place, without losing your login. Docker layer caching keeps per-user images cheap: users with identical Dockerfiles share every layer up to the `useradd`.
 
 If something looks wrong, `claude-sandbox --sandbox-doctor` (or `codex-sandbox --sandbox-doctor`) prints all of this state in one go — that's the first thing to run before filing an issue.
 
