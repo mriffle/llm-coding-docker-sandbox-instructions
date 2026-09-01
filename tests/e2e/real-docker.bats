@@ -106,7 +106,7 @@ assert_output_contains() { case "$output" in *"$1"*) return 0 ;; *) fail_with "e
 }
 
 @test "e2e: the everyday toolchains are present" {
-    run docker run --rm "$CLAUDE_IMAGE" sh -c 'git --version && python3 --version && cargo --version && rg --version && jq --version'
+    run docker run --rm "$CLAUDE_IMAGE" sh -c 'git --version && python3 --version && cargo --version && rg --version && jq --version && gh --version'
     assert_success
 }
 

@@ -526,6 +526,32 @@ ps_argv_lacks() {
     ps_argv_lacks "s3cret"
 }
 
+@test "ps launcher: --sandbox-git authenticates gh with the same token" {
+    ps_install claude
+    mkdir -p "$TESTDIR/proj"; cd "$TESTDIR/proj"
+    export FAKE_GIT_ORIGIN=https://github.com/ada/looms.git
+    export FAKE_GIT_CRED_USER=ada FAKE_GIT_CRED_PASS=s3cret
+    : > "$FAKE_DOCKER_ARGV"
+    run "$PWSH" -NoProfile -File "$LAUNCHER" --sandbox-git
+    assert_success
+    grep -qxF -- "GH_TOKEN=s3cret" "$FAKE_DOCKER_ARGV"
+    ps_argv_lacks "--sandbox-git"
+}
+
+@test "ps launcher: a non-GitHub host configures no gh" {
+    ps_install claude
+    mkdir -p "$TESTDIR/proj"; cd "$TESTDIR/proj"
+    export FAKE_GIT_ORIGIN=https://gitlab.example.org/ada/looms.git
+    export FAKE_GIT_CRED_USER=ada FAKE_GIT_CRED_PASS=s3cret
+    : > "$FAKE_DOCKER_ARGV"
+    run "$PWSH" -NoProfile -File "$LAUNCHER" --sandbox-git
+    assert_success
+    grep -qxF -- "SANDBOX_GIT_TOKEN=s3cret" "$FAKE_DOCKER_ARGV"
+    ps_argv_lacks "GH_TOKEN"
+    ps_argv_lacks "GH_HOST"
+    ps_argv_lacks "GH_ENTERPRISE_TOKEN"
+}
+
 @test "ps launcher: SANDBOX_NO_GIT suppresses everything" {
     ps_install claude
     mkdir -p "$TESTDIR/proj"; cd "$TESTDIR/proj"

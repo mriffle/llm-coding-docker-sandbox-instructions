@@ -16,6 +16,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     jq ripgrep procps \
     && rm -rf /var/lib/apt/lists/*
 
+# GitHub CLI. Not in Debian's archive, so it comes from GitHub's own signed
+# apt repository — which has the side benefit that a rebuild picks up the
+# current version with no pin to maintain. Inert on its own: gh authenticates
+# from GH_TOKEN in the environment, and the launcher sets that only when you
+# pass --sandbox-git.
+RUN install -d -m 0755 /etc/apt/keyrings \
+    && curl -fsSL --retry 3 --retry-connrefused \
+        https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+        -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+        > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update && apt-get install -y --no-install-recommends gh \
+    && rm -rf /var/lib/apt/lists/*
+
 ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo
 # Downloaded to a file rather than piped into sh: a failed `curl | sh` exits 0
 # because sh simply reads empty input, so a transient network blip silently

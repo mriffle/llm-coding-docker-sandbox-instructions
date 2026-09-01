@@ -8,7 +8,7 @@ Design principles:
 
 - **Docker is the sandbox.** No reliance on agent self-restraint or agent-internal sandboxing.
 - **Log in once.** Auth tokens persist in per-user named volumes across sessions, rebuilds and upgrades.
-- **Minimal images.** The image is a sandbox skeleton plus everyday toolchains (C, Python, Rust). Anything else a project needs gets installed into that project's own directory (`./.jdk`, `./.bin`, `./.venv`) — resist adding it to the image.
+- **Minimal images.** The image is a sandbox skeleton plus everyday toolchains (C, Python, Rust) and the GitHub CLI. Anything else a project needs gets installed into that project's own directory (`./.jdk`, `./.bin`, `./.venv`) — resist adding it to the image.
 - **Per-user everything.** Image, volume and container names are namespaced by `$USER`, and the image is built with your UID, so multiple users on a shared rootful Docker daemon don't collide.
 
 ## Install
@@ -103,7 +103,7 @@ either one that vanishes at session exit, or one it writes into your real
 `user.name` / `user.email` from the directory you launch in, so a repo-local
 override is respected. No secret is involved and nothing is mounted.
 
-**Pushing needs `--sandbox-git`**, which is opt-in per session:
+**Pushing — and `gh` — needs `--sandbox-git`**, which is opt-in per session:
 
 ```bash
 claude-sandbox --sandbox-git --dangerously-skip-permissions
@@ -115,6 +115,21 @@ Because the host does the lookup, it works the same whether your credentials
 live in macOS Keychain, Windows Credential Manager, libsecret, or a plain file;
 the container never learns which.
 
+**The same token authenticates `gh`.** The GitHub CLI ships in the image but is
+inert on its own: it reads `GH_TOKEN` from the environment and never consults a
+git credential helper, so a container with a working `git push` and no
+`GH_TOKEN` has a `gh` that insists it is not logged in. `--sandbox-git` sets
+both, and the agent can open pull requests, triage issues and read Actions logs
+instead of hand-rolling `curl` against the API.
+
+You need neither `gh` installed on the host nor a prior `gh auth login`. GitHub
+has not accepted passwords over HTTPS since 2021, so whatever your credential
+store already holds for the remote is a token the API accepts. For a remote
+that is not `github.com`, `gh` is configured only when your host's own `gh` is
+logged in to that host — nothing else tells a GitHub Enterprise server apart
+from any other private host, and pointing `gh` at a GitLab install would help
+no one.
+
 Two limits worth knowing:
 
 - **HTTPS remotes only.** An `ssh://` or `git@host:path` remote never consults a
@@ -123,7 +138,8 @@ Two limits worth knowing:
 - **Scoped to the origin's host, not to the repo.** The credential is installed
   as `credential.https://<host>.helper`, so it is never offered to any other
   host — but within that host, whatever the token can reach, the agent can
-  reach. Use a fine-grained token.
+  reach: via git, via `gh`, and via the API directly, since the token is in the
+  container's environment. Use a fine-grained token.
 
 `--sandbox-doctor` reports what would be passed (never the credential itself),
 and `SANDBOX_NO_GIT=1` turns the whole thing off.

@@ -1085,6 +1085,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     jq ripgrep procps \
     && rm -rf /var/lib/apt/lists/*
 
+# GitHub CLI. Not in Debian's archive, so it comes from GitHub's own signed
+# apt repository — which has the side benefit that a rebuild picks up the
+# current version with no pin to maintain. Inert on its own: gh authenticates
+# from GH_TOKEN in the environment, and the launcher sets that only when you
+# pass --sandbox-git.
+RUN install -d -m 0755 /etc/apt/keyrings \
+    && curl -fsSL --retry 3 --retry-connrefused \
+        https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+        -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+        > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update && apt-get install -y --no-install-recommends gh \
+    && rm -rf /var/lib/apt/lists/*
+
 ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo
 # Downloaded to a file rather than piped into sh: a failed `curl | sh` exits 0
 # because sh simply reads empty input, so a transient network blip silently
@@ -1338,9 +1353,16 @@ git_origin_host() {
 
 GIT_CRED_USER=''
 GIT_CRED_TOKEN=''
+# Set when the credential is known to belong to a GitHub instance: github.com
+# itself, or a host the *host's* gh is logged in to. A token pulled from the
+# credential store for anything else might be GitHub Enterprise and might be
+# GitLab — the hostname does not say which — so gh is left unconfigured rather
+# than pointed at a server that does not speak its API.
+GIT_CRED_IS_GITHUB=''
 git_resolve_cred() {
     local host=$1 line out
-    GIT_CRED_USER=''; GIT_CRED_TOKEN=''
+    GIT_CRED_USER=''; GIT_CRED_TOKEN=''; GIT_CRED_IS_GITHUB=''
+    [ "$host" != github.com ] || GIT_CRED_IS_GITHUB=1
 
     if [ "$host" = github.com ] && [ -n "${GH_TOKEN:-${GITHUB_TOKEN:-}}" ]; then
         GIT_CRED_USER=x-access-token
@@ -1353,6 +1375,7 @@ git_resolve_cred() {
         if [ -n "$out" ]; then
             GIT_CRED_USER=x-access-token
             GIT_CRED_TOKEN=$out
+            GIT_CRED_IS_GITHUB=1
             return 0
         fi
     fi
@@ -1372,6 +1395,28 @@ git_resolve_cred() {
 $out
 EOF
     [ -n "$GIT_CRED_TOKEN" ]
+}
+
+# The same credential again, in the form the GitHub CLI reads. gh never
+# consults a git credential helper — the integration runs the other way, with
+# `gh auth setup-git` teaching git to call gh — so without this the container
+# would hold a working `git push` beside a gh that claims it is not logged in.
+#
+# This grants nothing new: SANDBOX_GIT_TOKEN is already in the same
+# environment, readable by anything the agent runs. It only spares the agent
+# from hand-rolling curl against api.github.com.
+#
+# GH_HOST is what makes an Enterprise remote work at all: gh talks to
+# github.com regardless of the token's origin unless told otherwise.
+gh_env_add() {
+    local host=$1
+    [ -n "$GIT_CRED_IS_GITHUB" ] || return 0
+    if [ "$host" = github.com ]; then
+        GIT_ENV_ARGS+=(-e "GH_TOKEN=$GIT_CRED_TOKEN")
+    else
+        GIT_ENV_ARGS+=(-e "GH_HOST=$host" \
+                       -e "GH_ENTERPRISE_TOKEN=$GIT_CRED_TOKEN")
+    fi
 }
 
 git_env_args() {
@@ -1394,6 +1439,7 @@ git_env_args() {
             GIT_ENV_ARGS+=(-e "SANDBOX_GIT_USER=$GIT_CRED_USER" \
                            -e "SANDBOX_GIT_TOKEN=$GIT_CRED_TOKEN")
             git_env_add "credential.https://$host.helper" "$GIT_CRED_HELPER"
+            gh_env_add "$host"
         else
             lwarn "--sandbox-git: no credential stored for $host; pushing will fail"
         fi
@@ -1561,6 +1607,8 @@ doctor() {
             printf '  git credential      no https remote here\n'
         elif git_resolve_cred "$host"; then
             printf '  git credential      available for %s — forward with --sandbox-git\n' "$host"
+            [ -z "$GIT_CRED_IS_GITHUB" ] \
+                || printf '  gh cli              the same flag authenticates it for %s\n' "$host"
         else
             printf '  git credential      none stored for %s\n' "$host"
         fi
@@ -1601,8 +1649,10 @@ which are only recognised in first position:
 
 Your git name and email are always passed through, so the agent can commit.
 --sandbox-git additionally forwards a credential for the origin remote's host,
-so it can push. That credential is scoped to that one host, but within it the
-token's own permissions apply — prefer a fine-grained one.
+so it can push. On a GitHub remote the same token also authenticates the gh
+CLI that ships in the image, so the agent can work issues and pull requests.
+The credential is scoped to that one host, but within it the token's own
+permissions apply — prefer a fine-grained one.
 
 The project is mounted inside the container at the same path it has on the
 host, so each project keeps its own agent memory, session history and

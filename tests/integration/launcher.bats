@@ -538,6 +538,56 @@ argv_lacks() {
     argv_has "SANDBOX_GIT_USER=x-access-token"
 }
 
+@test "--sandbox-git authenticates the image's gh with the same token" {
+    # gh consults no git credential helper, so the helper alone would leave a
+    # working `git push` beside a gh insisting it is not logged in.
+    cd "$PROJECT"
+    export FAKE_GIT_ORIGIN=https://github.com/ada/looms.git
+    export FAKE_GIT_CRED_USER=ada FAKE_GIT_CRED_PASS=s3cret
+    run bash "$LAUNCH" --sandbox-git
+    assert_success
+    argv_has "GH_TOKEN=s3cret"
+    argv_has "SANDBOX_GIT_TOKEN=s3cret"
+}
+
+@test "no GH_TOKEN reaches the container without --sandbox-git" {
+    cd "$PROJECT"
+    export FAKE_GIT_ORIGIN=https://github.com/ada/looms.git
+    export FAKE_GIT_CRED_USER=ada FAKE_GIT_CRED_PASS=s3cret
+    run bash "$LAUNCH"
+    assert_success
+    argv_lacks "GH_TOKEN"
+}
+
+@test "a stored credential for a non-GitHub host configures no gh" {
+    # gitlab.example.org might be GitHub Enterprise and might be GitLab; the
+    # hostname does not say, so gh is left unset rather than aimed at a server
+    # that does not speak its API. Pushing still works.
+    cd "$PROJECT"
+    export FAKE_GIT_ORIGIN=https://gitlab.example.org/ada/looms.git
+    export FAKE_GIT_CRED_USER=ada FAKE_GIT_CRED_PASS=s3cret
+    run bash "$LAUNCH" --sandbox-git
+    assert_success
+    argv_has "SANDBOX_GIT_TOKEN=s3cret"
+    argv_lacks "GH_TOKEN"
+    argv_lacks "GH_HOST"
+    argv_lacks "GH_ENTERPRISE_TOKEN"
+}
+
+@test "a host the local gh is logged in to is configured as Enterprise" {
+    # gh answering for the host is the only evidence available that it is a
+    # GitHub instance at all.
+    cd "$PROJECT"
+    export FAKE_GIT_ORIGIN=https://ghe.corp.example/ada/looms.git
+    export FAKE_GH_TOKEN=from-gh
+    run bash "$LAUNCH" --sandbox-git
+    assert_success
+    argv_has "GH_HOST=ghe.corp.example"
+    argv_has "GH_ENTERPRISE_TOKEN=from-gh"
+    # GH_TOKEN would send gh to github.com carrying an Enterprise token.
+    argv_lacks "GH_TOKEN="
+}
+
 @test "a non-github https remote still gets its own scoped helper" {
     cd "$PROJECT"
     export FAKE_GIT_ORIGIN=https://gitlab.example.org/ada/looms.git
@@ -584,6 +634,7 @@ argv_lacks() {
     assert_success
     assert_output_contains "Ada Lovelace <ada@example.com>"
     assert_output_contains "available for github.com"
+    assert_output_contains "gh cli"
     refute_output_contains "s3cret"
 }
 

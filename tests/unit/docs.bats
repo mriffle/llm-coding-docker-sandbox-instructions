@@ -115,6 +115,22 @@ RAW_BASE="https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main"
     done < <(grep -E '^(FROM|RUN|ENV|ARG|USER|WORKDIR) ' "$REPO_ROOT/src/assets/claude.Dockerfile")
 }
 
+@test "the images ship the gh the README says --sandbox-git authenticates" {
+    # Two separate facts back one promise: the binary is in the image, and the
+    # launcher hands it a token. Either alone leaves a gh that cannot log in.
+    assert_file_contains "$REPO_ROOT/README.md" 'The same token authenticates `gh`'
+    local f
+    for f in claude codex; do
+        grep -q 'apt-get install -y --no-install-recommends gh' \
+            "$REPO_ROOT/src/assets/$f.Dockerfile" \
+            || fail_with "$f.Dockerfile does not install gh"
+        grep -q 'GH_TOKEN=' "$REPO_ROOT/install/$f.sh" \
+            || fail_with "install/$f.sh never passes GH_TOKEN to the container"
+        grep -q 'GH_TOKEN=' "$REPO_ROOT/install/$f.ps1" \
+            || fail_with "install/$f.ps1 never passes GH_TOKEN to the container"
+    done
+}
+
 @test "the README documents the mount the launchers actually use" {
     # The fixed /workspace mount gave every project one agent identity; the
     # README has to describe the mirrored mount and the way back out of it.

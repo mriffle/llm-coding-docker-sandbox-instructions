@@ -716,6 +716,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     jq ripgrep procps \
     && rm -rf /var/lib/apt/lists/*
 
+# GitHub CLI. Not in Debian's archive, so it comes from GitHub's own signed
+# apt repository — which has the side benefit that a rebuild picks up the
+# current version with no pin to maintain. Inert on its own: gh authenticates
+# from GH_TOKEN in the environment, and the launcher sets that only when you
+# pass --sandbox-git.
+RUN install -d -m 0755 /etc/apt/keyrings \
+    && curl -fsSL --retry 3 --retry-connrefused \
+        https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+        -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+        > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update && apt-get install -y --no-install-recommends gh \
+    && rm -rf /var/lib/apt/lists/*
+
 # Rust toolchain (read-only at runtime; update = rebuild image)
 ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo
 # Downloaded to a file rather than piped into sh: a failed `curl | sh` exits 0
@@ -947,15 +962,18 @@ function Get-GitOriginHost {
     return ($hostPart -replace '^.*@', '')
 }
 
-# Returns @(user, token), or @() when nothing is available.
+# Returns @(user, token, isGitHub), or @() when nothing is available. The
+# third element says whether gh may be pointed at this host — see the shell
+# launcher's GIT_CRED_IS_GITHUB for why a hostname alone cannot settle it.
 function Get-GitCredential {
     param([string]$GitHost)
+    $isGitHub = ($GitHost -eq 'github.com')
     $envToken = if ($env:GH_TOKEN) { $env:GH_TOKEN } else { $env:GITHUB_TOKEN }
-    if ($GitHost -eq 'github.com' -and $envToken) { return @('x-access-token', $envToken) }
+    if ($GitHost -eq 'github.com' -and $envToken) { return @('x-access-token', $envToken, $true) }
 
     if (Get-Command gh -ErrorAction SilentlyContinue) {
         $t = (& gh auth token --hostname $GitHost 2>$null | Out-String).Trim()
-        if ($LASTEXITCODE -eq 0 -and $t) { return @('x-access-token', $t) }
+        if ($LASTEXITCODE -eq 0 -and $t) { return @('x-access-token', $t, $true) }
     }
 
     # The host's own store answers — on Windows that is usually Git Credential
@@ -972,7 +990,7 @@ function Get-GitCredential {
         if ($line -like 'username=*') { $u = $line.Substring(9) }
         elseif ($line -like 'password=*') { $p = $line.Substring(9) }
     }
-    if ($p) { return @($u, $p) }
+    if ($p) { return @($u, $p, $isGitHub) }
     return @()
 }
 
@@ -999,11 +1017,19 @@ function Get-GitEnvArgs {
             Write-Note "--sandbox-git: no https remote here; nothing to forward"
         } else {
             $cred = Get-GitCredential $gitHost
-            if ($cred.Count -eq 2) {
+            if ($cred.Count -eq 3) {
                 $envArgs += @('-e', "SANDBOX_GIT_USER=$($cred[0])", '-e', "SANDBOX_GIT_TOKEN=$($cred[1])")
                 $envArgs += @('-e', "GIT_CONFIG_KEY_$n=credential.https://$gitHost.helper",
                               '-e', "GIT_CONFIG_VALUE_$n=$GitCredHelper")
                 $n++
+                # The same token in the form gh reads; it consults no git helper.
+                if ($cred[2]) {
+                    if ($gitHost -eq 'github.com') {
+                        $envArgs += @('-e', "GH_TOKEN=$($cred[1])")
+                    } else {
+                        $envArgs += @('-e', "GH_HOST=$gitHost", '-e', "GH_ENTERPRISE_TOKEN=$($cred[1])")
+                    }
+                }
             } else {
                 Write-Note "--sandbox-git: no credential stored for $gitHost; pushing will fail"
             }
@@ -1099,10 +1125,16 @@ function Show-Doctor {
         $gitHost = Get-GitOriginHost
         if (-not $gitHost) {
             Write-Host "  git credential      no https remote here"
-        } elseif ((Get-GitCredential $gitHost).Count -eq 2) {
-            Write-Host "  git credential      available for $gitHost — forward with --sandbox-git"
         } else {
-            Write-Host "  git credential      none stored for $gitHost"
+            $cred = Get-GitCredential $gitHost
+            if ($cred.Count -eq 3) {
+                Write-Host "  git credential      available for $gitHost — forward with --sandbox-git"
+                if ($cred[2]) {
+                    Write-Host "  gh cli              the same flag authenticates it for $gitHost"
+                }
+            } else {
+                Write-Host "  git credential      none stored for $gitHost"
+            }
         }
     }
 
@@ -1143,7 +1175,9 @@ which are only recognised in first position:
 
 Your git name and email are always passed through, so the agent can commit.
 --sandbox-git additionally forwards a credential for the origin remote's host,
-so it can push. That credential is scoped to that one host, but within it the
+so it can push. On a GitHub remote the same token also authenticates the gh
+CLI that ships in the image, so the agent can work issues and pull requests.
+The credential is scoped to that one host, but within it the
 token's own permissions apply — prefer a fine-grained one.
 
 There is no --sandbox-tmux on native Windows; for detachable sessions, run
