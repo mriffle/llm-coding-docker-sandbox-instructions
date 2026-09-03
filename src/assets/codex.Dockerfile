@@ -16,6 +16,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     jq ripgrep procps \
     && rm -rf /var/lib/apt/lists/*
 
+# Docker CLI for --sandbox-docker; see the Claude Dockerfile note. Inert until
+# that flag mounts the socket.
+COPY --from=docker:29-cli /usr/local/bin/docker /usr/local/bin/docker
+COPY --from=docker:29-cli /usr/local/libexec/docker/cli-plugins/ /usr/local/libexec/docker/cli-plugins/
+
 ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo
 # Downloaded to a file rather than piped into sh: a failed `curl | sh` exits 0
 # because sh simply reads empty input, so a transient network blip silently

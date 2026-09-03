@@ -15,6 +15,10 @@
 #   FAKE_DOCKER_NEW_VOL_UID  owner recorded for newly created volumes
 #   FAKE_DOCKER_LEGACY_PROJECTS  pretend the config volume still holds the
 #                            pooled projects/-workspace directory
+#   FAKE_DOCKER_ENDPOINT     what `docker context inspect` reports
+#                            (default unix:///var/run/docker.sock)
+#   FAKE_DOCKER_SOCK_GID     group of the docker socket as seen inside a
+#                            container (default 999; set empty to fail the probe)
 set -u
 
 S="${FAKE_DOCKER_STATE:?FAKE_DOCKER_STATE must be set}"
@@ -66,6 +70,17 @@ info)
 
 version)
     if [ "${1:-}" = "-f" ] || [ "${1:-}" = "--format" ]; then printf '99.0.0-fake\n'; else printf 'fake docker\n'; fi
+    exit 0
+    ;;
+
+context)
+    # `docker context inspect --format '{{.Endpoints.docker.Host}}'` — how the
+    # launcher discovers the socket to hand to --sandbox-docker. Tests point it
+    # at a tcp:// endpoint to exercise the "nothing to mount" refusal.
+    sub=${1:-}; shift || true
+    case "$sub" in
+        inspect) printf '%s\n' "${FAKE_DOCKER_ENDPOINT:-unix:///var/run/docker.sock}" ;;
+    esac
     exit 0
     ;;
 
@@ -178,6 +193,13 @@ run)
     done
 
     case "$rest" in
+        *docker.sock*)
+            # The socket-group probe: `stat -c %g` on the socket as the daemon
+            # presents it once mounted. Must be matched before the generic
+            # *stat* case below, which answers for named volumes and would
+            # return nothing here (a host path is not a tracked volume).
+            # FAKE_DOCKER_SOCK_GID= makes the probe come back empty.
+            printf '%s\n' "${FAKE_DOCKER_SOCK_GID-999}"; exit 0 ;;
         *entrypoint*)
             printf '%s\n' "${FAKE_DOCKER_IMAGE_UID:-1001}"; exit 0 ;;
         *projects/-workspace*)

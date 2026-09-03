@@ -2,7 +2,7 @@
 #
 #  THIS FILE IS GENERATED — do not edit it directly.
 #  Source: src/, assembled by tools/build.sh. Edit there and rebuild.
-#  Version 1.1.0
+#  Version 1.2.0
 #
 #
 #   irm https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main/install/claude.ps1 | iex
@@ -26,7 +26,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 
-$script:InstallerVersion = '1.1.0'
+$script:InstallerVersion = '1.2.0'
 $script:RawBase          = 'https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main'
 $script:RepoUrl          = 'https://github.com/mriffle/llm-cli-docker-sandbox'
 $script:Agent            = 'claude'
@@ -698,7 +698,7 @@ $AssetDockerfile = @'
 # Anything else a project needs gets installed into that project's own
 # directory (./.jdk, ./.bin, etc.) — resist adding it here.
 #
-# Managed by the agent-sandbox installer (v1.1.0). Re-running the
+# Managed by the agent-sandbox installer (v1.2.0). Re-running the
 # installer rewrites this file; local edits are backed up first, but the
 # supported way to customise is to keep your own copy elsewhere and build
 # with --src-dir.
@@ -715,6 +715,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-pip python3-venv \
     jq ripgrep procps \
     && rm -rf /var/lib/apt/lists/*
+
+# Docker CLI, for --sandbox-docker (Docker-out-of-Docker). Inert on its own:
+# without the socket, which only that flag mounts, every command fails with
+# "cannot connect to the Docker daemon". Copied from the official image rather
+# than installed from Docker's apt repository — no key or source-list handling,
+# and the multi-arch image gives the right binary on arm64 as well as amd64.
+# The CLI is a static Go binary despite being built on Alpine, so it runs here.
+COPY --from=docker:29-cli /usr/local/bin/docker /usr/local/bin/docker
+COPY --from=docker:29-cli /usr/local/libexec/docker/cli-plugins/ /usr/local/libexec/docker/cli-plugins/
 
 # Rust toolchain (read-only at runtime; update = rebuild image)
 ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo
@@ -776,12 +785,12 @@ ENV CLAUDE_CONFIG_DIR=/home/agent/.claude
 $AssetLauncher = @'
 # claude-sandbox.ps1 — run Claude Code sandboxed in the current directory.
 #
-# Installed by the agent-sandbox installer (v1.1.0):
+# Installed by the agent-sandbox installer (v1.2.0):
 #   irm https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main/install/claude.ps1 | iex
 # Edits here are backed up, not preserved, when you upgrade.
 $ErrorActionPreference = 'Stop'
 
-$SandboxVersion = '1.1.0'
+$SandboxVersion = '1.2.0'
 $RawBase        = 'https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main'
 $RepoUrl        = 'https://github.com/mriffle/llm-cli-docker-sandbox'
 $Agent          = 'claude'
@@ -1147,7 +1156,10 @@ so it can push. That credential is scoped to that one host, but within it the
 token's own permissions apply — prefer a fine-grained one.
 
 There is no --sandbox-tmux on native Windows; for detachable sessions, run
-the sandbox from WSL instead (see WINDOWS.md, Route A).
+the sandbox from WSL instead (see WINDOWS.md, Route A). Nor is there a
+--sandbox-docker: Docker Desktop's daemon cannot resolve this container's
+/mnt/c/... paths, so bind mounts made inside the session would be empty. That
+route works from WSL2 too.
 
 The project is mounted inside the container at the same path it has on the
 host (C:\Users\you\repo becomes /mnt/c/Users/you/repo), so each project keeps
@@ -1173,6 +1185,23 @@ function Invoke-LauncherMain {
         $script:SandboxGit = $true
         $rest = @($rest | Select-Object -Skip 1)
     }
+    # There is no Docker-out-of-Docker on this route. Docker Desktop's daemon
+    # runs in a Linux VM that cannot resolve this container's /mnt/c/... paths,
+    # so a bind mount issued from inside the session would silently mount an
+    # empty directory instead of the project — a wrong answer, not an error.
+    # Under WSL2 the daemon and the container agree on paths, and it works.
+    if ($rest.Count -gt 0 -and $rest[0] -eq '--sandbox-docker') {
+        Write-Note "--sandbox-docker is not supported on native Windows."
+        Write-Note "  Docker Desktop's daemon runs in a Linux VM that cannot resolve this"
+        Write-Note "  container's /mnt/c/... paths, so bind mounts made inside the session"
+        Write-Note "  would silently be empty. Run the sandbox from WSL2 instead, where the"
+        Write-Note "  daemon and the container agree on paths — see WINDOWS.md, Route A."
+        exit 1
+    }
+    if ($env:SANDBOX_DOCKER) {
+        Write-Note "SANDBOX_DOCKER is set, but is ignored on native Windows; see WINDOWS.md"
+    }
+
     $first = if ($rest.Count -gt 0) { $rest[0] } else { '' }
     switch ($first) {
         '--sandbox-help'    { Show-LauncherUsage; exit 0 }
@@ -1197,7 +1226,7 @@ Invoke-LauncherMain @args
 $AssetShim = @'
 @echo off
 rem Shim so `claude-sandbox` works from cmd.exe and never trips execution policy.
-rem Installed by the agent-sandbox installer (v1.1.0).
+rem Installed by the agent-sandbox installer (v1.2.0).
 setlocal
 set "SANDBOX_PS1=%~dp0claude-sandbox.ps1"
 where pwsh >nul 2>nul

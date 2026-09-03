@@ -2,7 +2,7 @@
 #
 #  THIS FILE IS GENERATED — do not edit it directly.
 #  Source: src/, assembled by tools/build.sh. Edit there and rebuild.
-#  Version 1.1.0
+#  Version 1.2.0
 #
 #
 # Claude Code sandbox installer.
@@ -13,7 +13,7 @@
 # image, and the named volumes that hold your login. Re-run it to upgrade.
 set -euo pipefail
 
-INSTALLER_VERSION="1.1.0"
+INSTALLER_VERSION="1.2.0"
 RAW_BASE="https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main"
 REPO_URL="https://github.com/mriffle/llm-cli-docker-sandbox"
 
@@ -1072,7 +1072,7 @@ cat <<'__SANDBOX_ASSET_EOF__'
 # Anything else a project needs gets installed into that project's own
 # directory (./.jdk, ./.bin, etc.) — resist adding it here.
 #
-# Managed by the agent-sandbox installer (v1.1.0). Re-running the
+# Managed by the agent-sandbox installer (v1.2.0). Re-running the
 # installer rewrites this file; local edits are backed up first, but the
 # supported way to customise is to keep your own copy elsewhere and build
 # with --src-dir.
@@ -1089,6 +1089,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-pip python3-venv \
     jq ripgrep procps \
     && rm -rf /var/lib/apt/lists/*
+
+# Docker CLI, for --sandbox-docker (Docker-out-of-Docker). Inert on its own:
+# without the socket, which only that flag mounts, every command fails with
+# "cannot connect to the Docker daemon". Copied from the official image rather
+# than installed from Docker's apt repository — no key or source-list handling,
+# and the multi-arch image gives the right binary on arm64 as well as amd64.
+# The CLI is a static Go binary despite being built on Alpine, so it runs here.
+COPY --from=docker:29-cli /usr/local/bin/docker /usr/local/bin/docker
+COPY --from=docker:29-cli /usr/local/libexec/docker/cli-plugins/ /usr/local/libexec/docker/cli-plugins/
 
 # Rust toolchain (read-only at runtime; update = rebuild image)
 ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo
@@ -1154,7 +1163,7 @@ cat <<'__SANDBOX_ASSET_EOF__'
 #!/usr/bin/env bash
 # claude-sandbox — run Claude Code sandboxed in the current directory.
 #
-# Installed by the agent-sandbox installer (v1.1.0):
+# Installed by the agent-sandbox installer (v1.2.0):
 #   curl -fsSL https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main/install/claude.sh | bash
 # Edits here are backed up, not preserved, when you upgrade.
 #
@@ -1170,7 +1179,7 @@ IMAGE_BASENAME=claude-sandbox
 LAUNCHER_NAME=claude-sandbox
 
 # --- shared launcher machinery (generated; see https://github.com/mriffle/llm-cli-docker-sandbox) ----------------
-SANDBOX_VERSION="1.1.0"
+SANDBOX_VERSION="1.2.0"
 RAW_BASE="https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main"
 REPO_URL="https://github.com/mriffle/llm-cli-docker-sandbox"
 
@@ -1419,11 +1428,115 @@ git_env_args() {
     [ "$GIT_ENV_COUNT" -eq 0 ] || GIT_ENV_ARGS+=(-e "GIT_CONFIG_COUNT=$GIT_ENV_COUNT")
 }
 
+# --- docker-out-of-docker --------------------------------------------------
+# --sandbox-docker bind-mounts the host's Docker socket, so the agent can build
+# images and run containers. What it starts are *siblings* on the host daemon,
+# not children: their -v paths are resolved by that daemon, in host terms. That
+# works here only because the project is mounted at its own host path — inside
+# the container `-v "$PWD:/app"` names the same directory the daemon does. A
+# path that is not under the project mount is a path the daemon does not have,
+# and it silently gets an empty directory rather than an error.
+#
+# The flag hands over no privilege the user lacked: reaching the daemon at all
+# means being able to run docker without sudo, which on a rootful daemon is
+# already root-equivalent. What changes is who wields it — an autonomous,
+# prompt-injectable session. Hence opt-in per launch, and a warning every time.
+DOCKER_ARGS=()
+
+# The installer version that first shipped a docker CLI inside the image.
+DOCKER_CLI_SINCE=1.2.0
+
+# The endpoint the host's own CLI would use: honours DOCKER_HOST and the active
+# context, and needs no jq.
+docker_endpoint() {
+    local ep
+    ep=$(docker context inspect --format '{{.Endpoints.docker.Host}}' 2>/dev/null \
+        | head -1 | tr -d ' \r\n')
+    [ -n "$ep" ] || ep=${DOCKER_HOST:-}
+    [ -n "$ep" ] || ep='unix:///var/run/docker.sock'
+    printf '%s' "$ep"
+}
+
+# Only a unix socket can be handed through. tcp://, ssh:// and npipe:// have no
+# file to mount, and mounting a path that does not exist would give the
+# container an empty directory where it expects a daemon.
+docker_socket_path() {
+    local ep
+    ep=$(docker_endpoint)
+    case "$ep" in
+        unix://*) printf '%s' "${ep#unix://}" ;;
+        *) return 1 ;;
+    esac
+}
+
+# The group the socket carries *once mounted* — the only number that matters,
+# and not the one the host sees: Docker Desktop re-owns the socket inside its
+# VM, so a host-side stat there answers about a different file. Ask the daemon.
+#
+# Deliberately no host-side fallback. It would be consulted exactly when the
+# probe failed, and it is wrong precisely on the platforms where that is most
+# likely — a confidently wrong GID buys a "permission denied" with nothing to
+# point at. Empty means "unknown", and the caller says so out loud.
+docker_socket_gid() {
+    local sock=$1 gid
+    # One line on purpose: `stat -c` is GNU-only, and both the portability
+    # guard's exemption and the reader need to see that it runs in a container
+    # (always Linux) rather than on a possibly-BSD host.
+    gid=$(docker run --rm -v "$sock:/var/run/docker.sock" "$IMAGE" stat -c %g /var/run/docker.sock 2>/dev/null | head -1 | tr -d ' \r\n')
+    case "$gid" in ''|*[!0-9]*) gid='' ;; esac
+    printf '%s' "$gid"
+}
+
+docker_sock_args() {
+    local sock gid built
+    DOCKER_ARGS=()
+    [ -n "${SANDBOX_DOCKER:-}" ] || return 0
+
+    if ! sock=$(docker_socket_path); then
+        ldie "--sandbox-docker: $(docker_endpoint) is not a unix socket, so there is nothing to mount"
+    fi
+    # Refuse rather than mount a path that is not there: docker would helpfully
+    # create it on the host as a *directory* and mount that, so the agent would
+    # find a directory where it expects a socket, and the host would be left
+    # with a stray one.
+    if [ ! -e "$sock" ]; then
+        ldie "--sandbox-docker: the daemon's endpoint names $sock, which does not exist"
+    fi
+
+    # An image built before the CLI was bundled would take the socket and have
+    # nothing to use it with. The installer's version label is local and free
+    # to read, so this costs nothing and replaces a baffling "docker: command
+    # not found" inside an autonomous session with a sentence at launch.
+    built=$(docker image inspect -f '{{index .Config.Labels "sandbox.installer_version"}}' "$IMAGE" 2>/dev/null | tr -d ' \r\n')
+    if [ -n "$built" ] && version_gt "$DOCKER_CLI_SINCE" "$built"; then
+        lwarn "--sandbox-docker: this image was built by installer v$built, which"
+        lwarn "  predates the bundled docker CLI — re-run the installer, or the"
+        lwarn "  agent will find no docker command inside"
+    fi
+
+    lwarn "--sandbox-docker: this session can reach the host Docker daemon."
+    lwarn "  The agent can start containers that mount any host path — your home"
+    lwarn "  directory included — so the container is no longer a boundary."
+
+    DOCKER_ARGS=(-v "$sock:/var/run/docker.sock")
+    # A numeric GID needs no matching entry in the image's /etc/group, and
+    # supplementary groups are applied before capabilities drop, so this works
+    # alongside --cap-drop=ALL and --security-opt=no-new-privileges.
+    gid=$(docker_socket_gid "$sock")
+    if [ -n "$gid" ]; then
+        DOCKER_ARGS+=(--group-add "$gid")
+    else
+        lwarn "--sandbox-docker: could not determine the socket's group; if docker"
+        lwarn "  commands inside fail with 'permission denied', that is why"
+    fi
+}
+
 run_container() {
     local src dst
     src=$(host_workdir)
     dst=$(container_workdir)
     git_env_args
+    docker_sock_args
     # The ${a[@]+"${a[@]}"} form, not a bare "${a[@]}": expanding an *empty*
     # array under `set -u` is fatal on bash 3.2, which is still macOS /bin/bash.
     exec docker run -it --rm \
@@ -1432,6 +1545,7 @@ run_container() {
         -w "$dst" \
         "${MOUNT_ARGS[@]}" \
         ${GIT_ENV_ARGS[@]+"${GIT_ENV_ARGS[@]}"} \
+        ${DOCKER_ARGS[@]+"${DOCKER_ARGS[@]}"} \
         --cap-drop=ALL \
         --security-opt=no-new-privileges \
         "$IMAGE" "$AGENT_BIN" "$@"
@@ -1486,9 +1600,10 @@ tmux_launch() {
     self=$(launcher_self)
     # %q keeps arguments with spaces intact through tmux's shell.
     cmd=$(printf '%q ' "$self" "$@")
-    # --sandbox-git was consumed before the dispatch, so it is no longer in "$@";
-    # carry the decision into the session as environment instead.
-    cmd="SANDBOX_IN_TMUX=1 ${SANDBOX_GIT:+SANDBOX_GIT=1 }$cmd; ec=\$?; if [ \$ec -ne 0 ]; then printf 'exited with status %s — press Enter to close\\n' \"\$ec\"; read -r _; fi"
+    # --sandbox-git and --sandbox-docker were consumed before the dispatch, so
+    # they are no longer in "$@"; carry the decisions into the session as
+    # environment instead.
+    cmd="SANDBOX_IN_TMUX=1 ${SANDBOX_GIT:+SANDBOX_GIT=1 }${SANDBOX_DOCKER:+SANDBOX_DOCKER=1 }$cmd; ec=\$?; if [ \$ec -ne 0 ]; then printf 'exited with status %s — press Enter to close\\n' \"\$ec\"; read -r _; fi"
 
     tmux new-session -d -s "$session" -c "$PWD" "$cmd" \
         || ldie "could not create the tmux session $session"
@@ -1503,7 +1618,7 @@ tmux_launch() {
 
 # --- doctor ----------------------------------------------------------------
 doctor() {
-    local manifest vol owner latest label_uid name email host
+    local manifest vol owner latest label_uid name email host sock gid
     printf '%s sandbox — doctor\n' "$AGENT_NAME"
     printf '  launcher version    %s (%s)\n' "$SANDBOX_VERSION" "$(launcher_self)"
     printf '  user / uid          %s / %s\n' "$(sandbox_user)" "$(id -u)"
@@ -1525,6 +1640,30 @@ doctor() {
         fi
     else
         printf '  image               MISSING (%s)\n' "$IMAGE"
+    fi
+
+    # What --sandbox-docker would mount, and whether the agent could use it.
+    # Reported always: knowing the flag is unavailable is worth as much as
+    # knowing it works, and neither costs anything unless the flag is passed.
+    if sock=$(docker_socket_path); then
+        gid=''
+        if docker image inspect "$IMAGE" >/dev/null 2>&1; then
+            gid=$(docker_socket_gid "$sock")
+        fi
+        if [ -n "$gid" ]; then
+            printf '  docker socket       %s (group %s inside) — mount it with --sandbox-docker\n' "$sock" "$gid"
+        else
+            printf '  docker socket       %s (group undetermined)\n' "$sock"
+        fi
+    else
+        printf '  docker socket       %s is not a unix socket — --sandbox-docker cannot work here\n' "$(docker_endpoint)"
+    fi
+    if docker image inspect "$IMAGE" >/dev/null 2>&1; then
+        if docker run --rm "$IMAGE" docker --version >/dev/null 2>&1; then
+            printf '  docker CLI in image present\n'
+        else
+            printf '  docker CLI in image MISSING — re-run the installer\n'
+        fi
     fi
 
     for vol in "${VOLUMES[@]}"; do
@@ -1609,6 +1748,7 @@ Everything is passed through to $AGENT_BIN untouched, except these flags,
 which are only recognised in first position:
 
   --sandbox-git [args...]            also forward a git credential (see below)
+  --sandbox-docker [args...]         also mount the host Docker socket (see below)
   --sandbox-tmux [args...]           run inside a tmux session for this project
   --sandbox-tmux-detached [args...]  same, but do not attach
   --sandbox-doctor                   report on image, volumes, UIDs and versions
@@ -1621,6 +1761,14 @@ Your git name and email are always passed through, so the agent can commit.
 so it can push. That credential is scoped to that one host, but within it the
 token's own permissions apply — prefer a fine-grained one.
 
+--sandbox-docker lets the agent use Docker, by mounting the host's socket. Be
+deliberate about it: the containers it starts are siblings on your daemon and
+can mount any host path, so the sandbox stops being a boundary for that
+session. It grants nothing you did not already have — talking to the daemon is
+root-equivalent on a rootful one — but it hands that to an autonomous agent.
+Bind mounts of the project work because the project keeps its host path; a path
+that only exists inside the container silently mounts as an empty directory.
+
 The project is mounted inside the container at the same path it has on the
 host, so each project keeps its own agent memory, session history and
 approvals. SANDBOX_WORKDIR overrides that if you need the old fixed path.
@@ -1629,6 +1777,7 @@ Environment:
   SANDBOX_NO_UPDATE_CHECK=1   never check upstream for a newer sandbox
   SANDBOX_NO_GIT=1            pass no git identity or credential at all
   SANDBOX_GIT=1               same as --sandbox-git
+  SANDBOX_DOCKER=1            same as --sandbox-docker
   SANDBOX_WORKDIR=/workspace  mount the project at this fixed path instead
                               (its agent state is then shared with every
                               other project run the same way)
@@ -1637,11 +1786,17 @@ USAGE
 
 launcher_main() {
     IMAGE="$IMAGE_BASENAME-$(sandbox_user)"
-    # Consumed before the dispatch below, so it composes: --sandbox-git
-    # --sandbox-tmux works, and the flag still only counts in first position.
-    case "${1:-}" in
-        --sandbox-git) SANDBOX_GIT=1; shift ;;
-    esac
+    # Consumed before the dispatch below, so they compose in any order:
+    # `--sandbox-docker --sandbox-git --sandbox-tmux` works. The loop stops at
+    # the first argument that is not one of them, so a flag still only counts
+    # at the front and everything else reaches the agent untouched.
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --sandbox-git)    SANDBOX_GIT=1; shift ;;
+            --sandbox-docker) SANDBOX_DOCKER=1; shift ;;
+            *) break ;;
+        esac
+    done
     case "${1:-}" in
         --sandbox-help)           launcher_usage; exit 0 ;;
         --sandbox-version)        printf '%s\n' "$SANDBOX_VERSION"; exit 0 ;;

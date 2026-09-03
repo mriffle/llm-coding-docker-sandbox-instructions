@@ -110,6 +110,16 @@ assert_output_contains() { case "$output" in *"$1"*) return 0 ;; *) fail_with "e
     assert_success
 }
 
+@test "e2e: the docker CLI is in the image, and inert without a socket" {
+    run docker run --rm "$CLAUDE_IMAGE" sh -c 'docker --version && docker buildx version && docker compose version'
+    assert_success
+    # Shipped unconditionally, so it must be harmless when --sandbox-docker is
+    # not given: no socket, no daemon, and a clear error rather than a hang.
+    run docker run --rm "$CLAUDE_IMAGE" docker ps
+    [ "$status" -ne 0 ] || fail_with "docker ps worked with no socket mounted"
+    assert_output_contains "docker.sock"
+}
+
 @test "e2e: the volumes exist and are owned by the host user" {
     docker volume inspect "claude-config-$E2E_USER" >/dev/null
     docker volume inspect "claude-local-$E2E_USER" >/dev/null
@@ -283,6 +293,57 @@ assert_output_contains() { case "$output" in *"$1"*) return 0 ;; *) fail_with "e
         "$CLAUDE_IMAGE" sh -c 'printf "protocol=https\nhost=gitlab.com\n\n" | git credential fill'
     [ "$status" -ne 0 ] || fail_with "another host was served the credential"
     case "$output" in *s3cret*) fail_with "the token leaked to another host" ;; esac
+}
+
+# --- --sandbox-docker against the real daemon ------------------------------
+# The socket path the launcher would hand to --sandbox-docker, or non-zero when
+# this host's daemon is not on a unix socket (ssh://, tcp://, a Windows pipe).
+e2e_docker_sock() {
+    local ep
+    ep=$(docker context inspect --format '{{.Endpoints.docker.Host}}' 2>/dev/null | head -1 | tr -d ' \r\n')
+    [ -n "$ep" ] || ep=${DOCKER_HOST:-unix:///var/run/docker.sock}
+    case "$ep" in unix://*) printf '%s' "${ep#unix://}" ;; *) return 1 ;; esac
+}
+
+# The group as the daemon presents it once mounted — not the host's view of the
+# same file, which Docker Desktop makes wrong.
+e2e_sock_gid() {
+    docker run --rm -v "$1:/var/run/docker.sock" "$CLAUDE_IMAGE" stat -c %g /var/run/docker.sock 2>/dev/null | head -1 | tr -d ' \r\n'
+}
+
+@test "e2e: the mounted socket really reaches the daemon, hardening and all" {
+    local sock gid
+    sock=$(e2e_docker_sock) || skip "this daemon is not on a unix socket"
+    gid=$(e2e_sock_gid "$sock")
+    [ -n "$gid" ] || skip "could not read the socket's group"
+    # --cap-drop=ALL and no-new-privileges stay on: a supplementary group is
+    # applied before capabilities are dropped, so it still works.
+    run docker run --rm -v "$sock:/var/run/docker.sock" --group-add "$gid" \
+        --cap-drop=ALL --security-opt=no-new-privileges "$CLAUDE_IMAGE" docker version -f '{{.Server.Version}}'
+    assert_success
+}
+
+@test "e2e: a container the agent starts sees the project at the same path" {
+    # The whole feature rests on this. Because the project is mounted at its
+    # host path, a -v issued *inside* the session names a directory the host
+    # daemon can resolve. Under a fixed /workspace mount this silently mounted
+    # the wrong thing, so it is a regression guard for container_workdir too.
+    local sock gid proj
+    sock=$(e2e_docker_sock) || skip "this daemon is not on a unix socket"
+    gid=$(e2e_sock_gid "$sock")
+    [ -n "$gid" ] || skip "could not read the socket's group"
+    proj="$BATS_TEST_TMPDIR/dood project"
+    mkdir -p "$proj"
+    echo "written-on-the-host" > "$proj/proof.txt"
+    # The sibling image is the sandbox image itself: already local, so the test
+    # neither pulls nor depends on a registry.
+    run docker run --rm -v "$proj:$proj" -w "$proj" \
+        -v "$sock:/var/run/docker.sock" --group-add "$gid" \
+        -e "SIBLING=$CLAUDE_IMAGE" \
+        --cap-drop=ALL --security-opt=no-new-privileges "$CLAUDE_IMAGE" \
+        sh -c 'docker run --rm -v "$PWD:/m" "$SIBLING" cat /m/proof.txt'
+    assert_success
+    assert_output_contains "written-on-the-host"
 }
 
 @test "e2e: uninstall removes the image but keeps the login volumes" {

@@ -18,6 +18,13 @@ setup() {
     export FAKE_INSTALLER_DIR="$REPO_ROOT/install"
     mkdir -p "$FAKE_TMUX_STATE"
     : > "$FAKE_TMUX_LOG"; : > "$FAKE_DOCKER_ARGV"; : > "$FAKE_CURL_LOG"
+    # A stand-in for the host's docker socket. --sandbox-docker refuses to
+    # mount a path that is not there, and the host running the suite may have
+    # no docker at all — GitHub's macOS runners do not — so the fake daemon is
+    # pointed at a file this test owns rather than at the real /var/run one.
+    FAKE_SOCK="$TESTDIR/docker.sock"
+    : > "$FAKE_SOCK"
+    export FAKE_DOCKER_ENDPOINT="unix://$FAKE_SOCK"
     bash "$(installer claude)" >/dev/null 2>&1
     LAUNCH="$HOME/.local/bin/claude-sandbox"
     PROJECT="$TESTDIR/my project"
@@ -592,4 +599,178 @@ argv_lacks() {
     run bash "$LAUNCH" --sandbox-doctor
     assert_success
     assert_output_contains "NONE configured"
+}
+
+# --- --sandbox-docker (Docker-out-of-Docker) --------------------------------
+# The flag mounts the host daemon's socket into the session, which removes the
+# boundary the sandbox exists to provide. These pin down that it happens only
+# when asked, that it is loud when it does, and that it fails honestly when the
+# host cannot support it.
+
+@test "no docker socket is mounted unless --sandbox-docker is given" {
+    cd "$PROJECT"
+    run bash "$LAUNCH"
+    assert_success
+    argv_lacks "/var/run/docker.sock"
+    argv_lacks "--group-add"
+    # The rest of the hardening is untouched by the feature.
+    argv_has "--cap-drop=ALL"
+}
+
+@test "--sandbox-docker mounts the socket and joins its group" {
+    cd "$PROJECT"
+    run bash "$LAUNCH"
+    : > "$FAKE_DOCKER_ARGV"
+    run bash "$LAUNCH" --sandbox-docker
+    assert_success
+    argv_has "-v"
+    argv_has "$FAKE_SOCK:/var/run/docker.sock"
+    argv_has "--group-add"
+    argv_has "999"
+    # Dropping capabilities does not stop a supplementary group from working,
+    # so the hardening stays exactly as it was.
+    argv_has "--cap-drop=ALL"
+    argv_has "--security-opt=no-new-privileges"
+    # A current image carries the CLI, so there is nothing to complain about.
+    refute_output_contains "predates the bundled docker CLI"
+}
+
+@test "--sandbox-docker says out loud that the boundary is gone" {
+    cd "$PROJECT"
+    run bash "$LAUNCH" --sandbox-docker
+    assert_success
+    assert_output_contains "can reach the host Docker daemon"
+    assert_output_contains "mount any host path"
+}
+
+@test "the warning is printed on every launch, not just the first" {
+    cd "$PROJECT"
+    run bash "$LAUNCH" --sandbox-docker
+    assert_output_contains "can reach the host Docker daemon"
+    run bash "$LAUNCH" --sandbox-docker
+    assert_output_contains "can reach the host Docker daemon"
+}
+
+@test "SANDBOX_DOCKER=1 is the same as the flag" {
+    cd "$PROJECT"
+    SANDBOX_DOCKER=1 run bash "$LAUNCH"
+    assert_success
+    argv_has "$FAKE_SOCK:/var/run/docker.sock"
+}
+
+@test "--sandbox-docker is stripped rather than passed to the agent" {
+    cd "$PROJECT"
+    run bash "$LAUNCH" --sandbox-docker --dangerously-skip-permissions
+    assert_success
+    argv_has "--dangerously-skip-permissions"
+    argv_lacks "--sandbox-docker"
+}
+
+@test "--sandbox-docker composes with --sandbox-git in either order" {
+    cd "$PROJECT"
+    export FAKE_GIT_ORIGIN=https://github.com/ada/looms.git
+    export FAKE_GIT_CRED_USER=ada FAKE_GIT_CRED_PASS=s3cret
+    run bash "$LAUNCH" --sandbox-docker --sandbox-git
+    assert_success
+    argv_has "SANDBOX_GIT_TOKEN=s3cret"
+    argv_has "$FAKE_SOCK:/var/run/docker.sock"
+    : > "$FAKE_DOCKER_ARGV"
+    run bash "$LAUNCH" --sandbox-git --sandbox-docker
+    assert_success
+    argv_has "SANDBOX_GIT_TOKEN=s3cret"
+    argv_has "$FAKE_SOCK:/var/run/docker.sock"
+}
+
+@test "--sandbox-docker composes with --sandbox-tmux by way of the session env" {
+    cd "$PROJECT"
+    run bash "$LAUNCH" --sandbox-docker --sandbox-tmux
+    assert_success
+    tmux_log_has "SANDBOX_DOCKER=1"
+}
+
+@test "--sandbox-docker is only honoured in first position" {
+    cd "$PROJECT"
+    run bash "$LAUNCH" --print --sandbox-docker
+    assert_success
+    argv_has "--sandbox-docker"
+    argv_lacks "/var/run/docker.sock"
+}
+
+@test "an endpoint that is not a unix socket is refused, not half-honoured" {
+    cd "$PROJECT"
+    export FAKE_DOCKER_ENDPOINT='tcp://192.0.2.1:2375'
+    run bash "$LAUNCH" --sandbox-docker
+    assert_failure
+    assert_output_contains "is not a unix socket"
+    argv_lacks "--group-add"
+}
+
+@test "a socket whose group cannot be determined warns but still launches" {
+    cd "$PROJECT"
+    # A socket that is there but whose group the probe cannot read. There is no
+    # host-side fallback on purpose — a guessed GID is wrong exactly where it
+    # would be used — so this must degrade to no --group-add at all, which is
+    # still correct for a 0666 socket.
+    : > "$TESTDIR/fake.sock"
+    export FAKE_DOCKER_ENDPOINT="unix://$TESTDIR/fake.sock"
+    export FAKE_DOCKER_SOCK_GID=''
+    run bash "$LAUNCH" --sandbox-docker
+    assert_success
+    assert_output_contains "could not determine the socket's group"
+    argv_has "$TESTDIR/fake.sock:/var/run/docker.sock"
+    argv_lacks "--group-add"
+}
+
+@test "an endpoint naming a socket that does not exist is refused" {
+    cd "$PROJECT"
+    # Mounting it would make docker create a directory on the host and hand the
+    # agent that, where it expects a socket.
+    export FAKE_DOCKER_ENDPOINT="unix://$TESTDIR/absent/docker.sock"
+    run bash "$LAUNCH" --sandbox-docker
+    assert_failure
+    assert_output_contains "which does not exist"
+    argv_lacks "$TESTDIR/absent/docker.sock"
+}
+
+@test "--sandbox-docker warns when the image predates the bundled docker CLI" {
+    cd "$PROJECT"
+    local labels="$FAKE_DOCKER_STATE/images/claude-sandbox-testuser.labels"
+    assert_file_exists "$labels"
+    sed 's/^sandbox.installer_version=.*/sandbox.installer_version=1.1.0/' \
+        "$labels" > "$labels.new"
+    mv "$labels.new" "$labels"
+    run bash "$LAUNCH" --sandbox-docker
+    assert_success
+    assert_output_contains "predates the bundled docker CLI"
+    # Still launches — the socket is mounted, it just may have nothing to use it.
+    argv_has "$FAKE_SOCK:/var/run/docker.sock"
+}
+
+@test "the socket the launcher mounts is the one the active context names" {
+    cd "$PROJECT"
+    # A rootless daemon keeps its socket under $XDG_RUNTIME_DIR, not /var/run,
+    # and that is the configuration worth supporting properly.
+    mkdir -p "$TESTDIR/rootless"
+    : > "$TESTDIR/rootless/docker.sock"
+    export FAKE_DOCKER_ENDPOINT="unix://$TESTDIR/rootless/docker.sock"
+    run bash "$LAUNCH" --sandbox-docker
+    assert_success
+    argv_has "$TESTDIR/rootless/docker.sock:/var/run/docker.sock"
+    argv_lacks "$FAKE_SOCK:/var/run/docker.sock"
+}
+
+@test "--sandbox-doctor reports the socket, its group, and the CLI" {
+    cd "$PROJECT"
+    run bash "$LAUNCH" --sandbox-doctor
+    assert_success
+    assert_output_contains "docker socket       $FAKE_SOCK (group 999 inside)"
+    assert_output_contains "docker CLI in image present"
+}
+
+@test "--sandbox-doctor says when the host cannot support the flag at all" {
+    cd "$PROJECT"
+    export FAKE_DOCKER_ENDPOINT='tcp://192.0.2.1:2375'
+    run bash "$LAUNCH" --sandbox-doctor
+    assert_success
+    assert_output_contains "--sandbox-docker cannot work here"
 }

@@ -21,6 +21,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     jq ripgrep procps \
     && rm -rf /var/lib/apt/lists/*
 
+# Docker CLI, for --sandbox-docker (Docker-out-of-Docker). Inert on its own:
+# without the socket, which only that flag mounts, every command fails with
+# "cannot connect to the Docker daemon". Copied from the official image rather
+# than installed from Docker's apt repository — no key or source-list handling,
+# and the multi-arch image gives the right binary on arm64 as well as amd64.
+# The CLI is a static Go binary despite being built on Alpine, so it runs here.
+COPY --from=docker:29-cli /usr/local/bin/docker /usr/local/bin/docker
+COPY --from=docker:29-cli /usr/local/libexec/docker/cli-plugins/ /usr/local/libexec/docker/cli-plugins/
+
 # Rust toolchain (read-only at runtime; update = rebuild image)
 ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo
 # Downloaded to a file rather than piped into sh: a failed `curl | sh` exits 0

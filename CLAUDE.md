@@ -124,6 +124,18 @@ runs under `pwsh` on the Linux runner.
   PowerShell needs the explicit `-PrintPath` switch instead of an
   is-it-captured test: its success stream reaches `| iex` without the
   process's stdout ever being redirected.
+- **The docker socket's group must be read from inside a container.** The host's
+  own `stat` of `/var/run/docker.sock` answers for the host's filesystem, and on
+  Docker Desktop that is not the file the container gets — the socket is re-owned
+  inside the VM, so the host's GID is simply the wrong number and `--group-add`
+  built from it yields "permission denied" with nothing to point at.
+  `docker_socket_gid` mounts the socket into a throwaway container and asks
+  `stat -c %g` there, and there is deliberately **no host-side fallback**: it
+  would be consulted exactly when the probe failed, and it is wrong precisely on
+  the platforms where that is likeliest. Unknown is reported as unknown. For the
+  same reason the socket path comes from `docker context inspect`, not a hard-coded
+  `/var/run/docker.sock`: rootless daemons, Colima and OrbStack all put it
+  elsewhere, and a `tcp://` or `ssh://` endpoint has no socket to mount at all.
 - **One mount point is one project identity.** Both agents key their
   per-project state on the working directory *string* — Claude Code's
   `~/.claude/projects/<cwd-slugified>/` (session transcripts *and* memory), the

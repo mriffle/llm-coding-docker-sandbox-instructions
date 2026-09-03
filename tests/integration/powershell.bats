@@ -549,3 +549,24 @@ ps_argv_lacks() {
     assert_output_contains 'available for github.com'
     refute_output_contains 's3cret'
 }
+
+@test "ps launcher: --sandbox-docker is refused and points at WSL2" {
+    ps_install claude
+    : > "$FAKE_DOCKER_LOG"
+    run "$PWSH" -NoProfile -File "$LAUNCHER" --sandbox-docker
+    assert_failure
+    assert_output_contains 'not supported on native Windows'
+    assert_output_contains 'WINDOWS.md'
+    # A refusal, not a half-honoured launch: no container, no socket.
+    refute_docker_ran 'docker run'
+    refute_docker_ran 'docker.sock'
+}
+
+@test "ps launcher: SANDBOX_DOCKER in the environment is ignored, and says so" {
+    ps_install claude
+    : > "$FAKE_DOCKER_LOG"
+    SANDBOX_DOCKER=1 run "$PWSH" -NoProfile -File "$LAUNCHER"
+    assert_success
+    assert_output_contains 'ignored on native Windows'
+    refute_docker_ran 'docker.sock'
+}

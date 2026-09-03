@@ -38,8 +38,8 @@ plus two Docker images and three named volumes that the launchers create and mai
 
 The installers create the same files, with two additions: a manifest under
 `~/.local/share/agent-sandbox/` recording what was installed, and launchers that
-carry `--sandbox-tmux`, `--sandbox-doctor` and `--sandbox-upgrade`. The hand-built
-launchers below are the plain versions.
+carry `--sandbox-tmux`, `--sandbox-docker`, `--sandbox-doctor` and
+`--sandbox-upgrade`. The hand-built launchers below are the plain versions.
 
 These instructions target Linux and macOS hosts. **Windows users:** see
 [WINDOWS.md](WINDOWS.md).
@@ -116,6 +116,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-pip python3-venv \
     jq ripgrep procps \
     && rm -rf /var/lib/apt/lists/*
+
+# Docker CLI, for the optional socket mount below (--sandbox-docker in the
+# installed launcher). Inert without the socket. Copied from the official
+# image: no apt repository or key handling, and the multi-arch image gives the
+# right binary on arm64 too. The CLI is static despite being built on Alpine.
+COPY --from=docker:29-cli /usr/local/bin/docker /usr/local/bin/docker
+COPY --from=docker:29-cli /usr/local/libexec/docker/cli-plugins/ /usr/local/libexec/docker/cli-plugins/
 
 # Rust toolchain (read-only at runtime; update = rebuild image)
 ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo
@@ -229,6 +236,20 @@ Notes:
   ```
 
   `GIT_TERMINAL_PROMPT=0` matters — without it a missing credential makes git prompt on the terminal instead of declining. The helper key is scoped to one host, so the credential is never offered to another; within that host, the token's own permissions apply. The installed launcher does all of this behind `--sandbox-git`.
+- **To let the agent use Docker**, mount the host's socket and join its group. Two arguments, and they are the ones to think hardest about before adding:
+
+  ```bash
+  sock=$(docker context inspect --format '{{.Endpoints.docker.Host}}')
+  sock=${sock#unix://}                    # tcp:// and ssh:// cannot be mounted
+  # The group as the daemon presents the socket *once mounted* — not the host's
+  # view of the same file, which Docker Desktop makes wrong.
+  gid=$(docker run --rm -v "$sock:/var/run/docker.sock" claude-sandbox-$USER \
+          stat -c %g /var/run/docker.sock)
+  # ...then add to the docker run above:
+  #   -v "$sock:/var/run/docker.sock" --group-add "$gid" \
+  ```
+
+  A supplementary group is applied before capabilities are dropped, so this works alongside `--cap-drop=ALL` and `--security-opt=no-new-privileges` — which is also the point: those flags protect the sandbox, not the sibling containers the agent starts through the socket. Anything it launches can mount any host path. The containers are siblings on your daemon, so their `-v` sources are host paths; that works because the project is mounted at its own host path, and a path that exists only inside the container will silently mount as an empty directory. The installed launcher does all of this behind `--sandbox-docker`, and warns every time.
 - No resource limits are set. If runaway sessions on a shared box ever become a problem, add `--memory`, `--cpus`, and `--pids-limit` here.
 
 ### Setup (per user)
@@ -314,6 +335,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-pip python3-venv \
     jq ripgrep procps \
     && rm -rf /var/lib/apt/lists/*
+
+# Docker CLI for the optional socket mount; see the Claude image above.
+COPY --from=docker:29-cli /usr/local/bin/docker /usr/local/bin/docker
+COPY --from=docker:29-cli /usr/local/libexec/docker/cli-plugins/ /usr/local/libexec/docker/cli-plugins/
 
 ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo
 # Downloaded to a file rather than piped into sh: a failed `curl | sh` exits 0

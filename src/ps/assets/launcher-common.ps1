@@ -356,7 +356,10 @@ so it can push. That credential is scoped to that one host, but within it the
 token's own permissions apply — prefer a fine-grained one.
 
 There is no --sandbox-tmux on native Windows; for detachable sessions, run
-the sandbox from WSL instead (see WINDOWS.md, Route A).
+the sandbox from WSL instead (see WINDOWS.md, Route A). Nor is there a
+--sandbox-docker: Docker Desktop's daemon cannot resolve this container's
+/mnt/c/... paths, so bind mounts made inside the session would be empty. That
+route works from WSL2 too.
 
 The project is mounted inside the container at the same path it has on the
 host (C:\Users\you\repo becomes /mnt/c/Users/you/repo), so each project keeps
@@ -382,6 +385,23 @@ function Invoke-LauncherMain {
         $script:SandboxGit = $true
         $rest = @($rest | Select-Object -Skip 1)
     }
+    # There is no Docker-out-of-Docker on this route. Docker Desktop's daemon
+    # runs in a Linux VM that cannot resolve this container's /mnt/c/... paths,
+    # so a bind mount issued from inside the session would silently mount an
+    # empty directory instead of the project — a wrong answer, not an error.
+    # Under WSL2 the daemon and the container agree on paths, and it works.
+    if ($rest.Count -gt 0 -and $rest[0] -eq '--sandbox-docker') {
+        Write-Note "--sandbox-docker is not supported on native Windows."
+        Write-Note "  Docker Desktop's daemon runs in a Linux VM that cannot resolve this"
+        Write-Note "  container's /mnt/c/... paths, so bind mounts made inside the session"
+        Write-Note "  would silently be empty. Run the sandbox from WSL2 instead, where the"
+        Write-Note "  daemon and the container agree on paths — see WINDOWS.md, Route A."
+        exit 1
+    }
+    if ($env:SANDBOX_DOCKER) {
+        Write-Note "SANDBOX_DOCKER is set, but is ignored on native Windows; see WINDOWS.md"
+    }
+
     $first = if ($rest.Count -gt 0) { $rest[0] } else { '' }
     switch ($first) {
         '--sandbox-help'    { Show-LauncherUsage; exit 0 }

@@ -112,7 +112,17 @@ RAW_BASE="https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main"
     while IFS= read -r line; do
         grep -qF "$line" "$REPO_ROOT/MANUAL.md" \
             || fail_with "MANUAL.md is missing a Dockerfile line the installer ships: $line"
-    done < <(grep -E '^(FROM|RUN|ENV|ARG|USER|WORKDIR) ' "$REPO_ROOT/src/assets/claude.Dockerfile")
+    done < <(grep -E '^(FROM|RUN|ENV|ARG|USER|WORKDIR|COPY) ' "$REPO_ROOT/src/assets/claude.Dockerfile")
+}
+
+@test "the README's security notes describe the socket as it now behaves" {
+    # From v1.2.0 the images ship the Docker CLI and --sandbox-docker can mount
+    # the host socket. The old note promised the opposite, which would leave a
+    # false claim in the section people read to decide whether to trust this.
+    refute_file_contains "$REPO_ROOT/README.md" 'The images contain no Docker client'
+    assert_file_contains "$REPO_ROOT/README.md" '--sandbox-docker'
+    grep -qF -- '--sandbox-docker' "$REPO_ROOT/install/claude.ps1" \
+        || fail_with "the PowerShell launcher never mentions --sandbox-docker"
 }
 
 @test "the README documents the mount the launchers actually use" {

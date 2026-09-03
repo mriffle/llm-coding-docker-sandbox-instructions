@@ -88,6 +88,7 @@ Everything else you pass is handed to the agent untouched. The launcher recognis
 | Flag | What it does |
 | --- | --- |
 | `--sandbox-git` | also forward a git credential, so the agent can push — see [Git](#git) |
+| `--sandbox-docker` | also mount the host Docker socket, so the agent can use Docker — see [Docker](#docker-inside-the-sandbox) |
 | `--sandbox-tmux` / `--sandbox-tmux-detached` | run inside a tmux session for this project |
 | `--sandbox-doctor` | report on image, volumes, UIDs, versions — start here when something's wrong |
 | `--sandbox-upgrade` | re-run the installer to update |
@@ -127,6 +128,59 @@ Two limits worth knowing:
 
 `--sandbox-doctor` reports what would be passed (never the credential itself),
 and `SANDBOX_NO_GIT=1` turns the whole thing off.
+
+## Docker inside the sandbox
+
+Some projects *are* Docker: the tests bring up a compose stack, the build
+produces an image. `--sandbox-docker` mounts the host's Docker socket into the
+session so the agent can do that work:
+
+```bash
+claude-sandbox --sandbox-docker --dangerously-skip-permissions
+```
+
+It is opt-in per launch, and it warns every time, because it is the one flag
+here that removes the sandbox's boundary.
+
+**What it actually changes.** It grants the agent nothing you did not already
+have: reaching the daemon at all means being able to run `docker` without
+`sudo`, and on a rootful daemon that is already root-equivalent — you could
+always type `docker run -v /:/host` yourself. What changes is *who* holds that
+power. An autonomous session that gets prompt-injected can start a container
+that mounts any path on the host, your home directory included, and the
+`--cap-drop=ALL` hardening on the sandbox does not apply to the containers it
+starts. Turn it on for projects that need it; leave it off otherwise.
+
+**Paths work, because the project keeps its host path.** The containers the
+agent starts are siblings on your daemon, not children, so their `-v` paths are
+resolved by the *host*. That lines up here: `docker run -v "$PWD:/app"` from
+inside the session mounts the very directory you launched from. See
+[why the project keeps its own path](#why-the-project-keeps-its-own-path-inside-the-container)
+— this is a second reason that decision matters.
+
+Two consequences worth knowing:
+
+- **A path that exists only inside the container mounts as an empty
+  directory**, silently. `/tmp/scratch` in the session is not `/tmp/scratch` on
+  the host, and the daemon just creates it. Keep bind-mount sources under the
+  project.
+- **Containers the agent starts outlive the session.** Nothing cleans them up
+  when the sandbox exits. Tell the agent to use `--rm` in your project's
+  `CLAUDE.md` / `AGENTS.md`, and check `docker ps -a` now and then.
+
+**Which daemon.** The launcher hands over whatever socket your active Docker
+context names, so rootless Docker works and is the configuration to prefer —
+the blast radius is then your own account rather than the host. If the endpoint
+is `tcp://` or `ssh://` there is no socket to pass through and the launcher
+says so instead of half-working. On **native Windows** the flag is refused
+outright: Docker Desktop's daemon runs in a Linux VM that cannot resolve the
+container's `/mnt/c/...` paths, so bind mounts made inside the session would be
+silently empty. Run the sandbox from WSL2 instead, where it works normally.
+
+`--sandbox-doctor` shows the socket it would mount and the group it would join,
+whether or not you pass the flag. The Docker CLI (plus `buildx` and `compose`)
+is in the image either way — without the socket it simply has no daemon to talk
+to, and says so.
 
 ## Upgrading
 
@@ -185,6 +239,7 @@ Nothing outside these paths is touched, except one guarded two-line block append
 | `~/.local` | `claude-local-$USER` volume | auto-updated Claude binary — permanent |
 | `~/.codex` | `codex-config-$USER` volume | auth, `config.toml`, state DB — permanent |
 | git identity (and, with `--sandbox-git`, a credential) | environment only | that session — never written to a volume or a file |
+| `/var/run/docker.sock`, only with `--sandbox-docker` | bind mount of the host socket | that session — see [Docker inside the sandbox](#docker-inside-the-sandbox) |
 | everything else (`~/.cargo`, `~/.npm-global`, …) | container layer | discarded at session exit |
 
 Plugins installed via `/plugin install` live in the config volume, so they persist and are shared across all of that user's projects.
@@ -250,10 +305,10 @@ If something looks wrong, `claude-sandbox --sandbox-doctor` (or `codex-sandbox -
 ## Security notes
 
 - **The container is the entire boundary.** In bypass/yolo mode, a prompt-injected or misbehaving session can do anything *inside* it: modify the mounted project, read the agent credentials in its volume, and reach the open network. Only run against repositories you trust.
-- **Never mount host secrets** (`~/.ssh`, cloud credential files, `~/.gitconfig` with tokens) into the container. The launchers mount no host path but `$PWD`, and nothing here changes that: git identity and, with `--sandbox-git`, a git credential are passed as *environment*, resolved on the host, for one session.
+- **Never mount host secrets** (`~/.ssh`, cloud credential files, `~/.gitconfig` with tokens) into the container. The launchers mount no host path but `$PWD` — the one exception being the Docker socket, and only when you ask for it with `--sandbox-docker`. Git identity and, with `--sandbox-git`, a git credential are passed as *environment*, resolved on the host, for one session.
 - **A forwarded git credential is a real grant.** `--sandbox-git` is opt-in per launch for that reason. It is scoped to the origin remote's host, but within that host the token's own permissions apply, and an autonomous session that is prompt-injected can use it or exfiltrate it (egress is open — see below). Prefer a fine-grained, revocable token over one with broad `repo` scope, and leave the flag off when the agent has no reason to push. Identity alone (the default) carries no secret.
 - **Egress is unrestricted by default** in these launchers. For defense against exfiltration, adapt the default-deny firewall from Anthropic's [reference devcontainer](https://github.com/anthropics/claude-code/tree/main/.devcontainer) (`init-firewall.sh` + `NET_ADMIN`/`NET_RAW` caps) — and be prepared to maintain a domain allowlist for package registries your projects use.
-- **No Docker socket, no privileged flags.** The images contain no Docker client; if you ever add one, mounting the host Docker socket into an autonomous agent's container is a sandbox escape (root-equivalent on rootful daemons). Keep it out, or make it a conscious opt-in.
+- **The Docker socket is a conscious opt-in, and it ends the sandbox.** By default no socket is mounted and no privileged flags are passed; the Docker CLI that ships in the image has no daemon to reach. `--sandbox-docker` changes that for one session, and with it an autonomous agent can start a sibling container that mounts any host path — that is a sandbox escape by design, not a bug in it. It escalates nothing you did not already hold (docker access without `sudo` is root-equivalent on a rootful daemon), but it delegates that to a session that can be prompt-injected. Use [rootless Docker](https://docs.docker.com/engine/security/rootless/) if you use the flag routinely, and see [Docker inside the sandbox](#docker-inside-the-sandbox). Mounting the socket `:ro` is not a mitigation — it restricts the mount, not the API.
 - **Non-root inside the container** (`agent` user) is required by Claude Code's bypass flag and is good hygiene for both agents regardless.
 - **About `curl … | bash`.** It's the same delivery Claude Code itself uses, and it deserves the same scrutiny as any other. The scripts are plain, readable, and at a stable URL, so you can look first:
 
